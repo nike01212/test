@@ -1,0 +1,367 @@
+// 個股比對：在瀏覽器裡跑（伺服器每次請求只有 10ms CPU，比對兩千家公司名稱放在這裡做）。
+// 輸入一段文字，找出提到的個股；對不到或有歧義的標成「待確認」。
+// 名稱來源：public/data/stocks.json（官方清單）＋ public/data/name-rules.json（手動維護的別名與易混淆詞）。
+
+const SENTENCE_BREAK = /[。！？!?；;\n\r]/;
+const KEEP_BREAK = /[。！？!?；;]/; // 這些標點留在句子裡，換行不留
+const MAX_SENTENCES = 2;
+const LONG_SENTENCE = 160; // 句子太長時只留提到個股的前後一段
+const CONTEXT = 70;
+const TITLE_LENGTH = 60;
+
+// 括號裡的代號：(2330)、（2330）、(2330.TW)、(2330 TT)
+const BRACKET_CODE = /\(\s*(\d{4})\s*(?:[.-]?\s*(?:TWO|TW|TT))?\s*\)/g;
+// 2330.TW、6488.TWO
+const SUFFIX_CODE = /(?<![\d.])(\d{4})\.(?:TWO|TW)(?![A-Z])/g;
+
+// 名稱的優先順序：手動別名 > 官方簡稱 > 由全名產生的別名
+const TIER_MANUAL = 0;
+const TIER_OFFICIAL = 1;
+const TIER_DERIVED = 2;
+const TIER_IGNORE_ONLY = 9;
+
+// 逐字正規化，長度不變，位置才能對回原文：全形英數→半形、英文轉大寫、臺→台
+export function normalize(text) {
+  return text.replace(/[！-～　臺a-z]/g, (c) => {
+    if (c === "臺") return "台";
+    if (c === "　") return " ";
+    const code = c.charCodeAt(0);
+    const half = code >= 0xff01 ? String.fromCharCode(code - 0xfee0) : c;
+    return half.toUpperCase();
+  });
+}
+
+function isAsciiWordChar(c) {
+  return c !== undefined && /[A-Z0-9]/.test(c);
+}
+
+// 第一個非空白行當標題
+export function makeTitle(text) {
+  const line = text.split(/\r?\n/).map((s) => s.trim()).find(Boolean) ?? "";
+  return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH)}…` : line;
+}
+
+function sentenceRanges(norm) {
+  const ranges = [];
+  let start = 0;
+  for (let i = 0; i <= norm.length; i++) {
+    const c = norm[i];
+    if (i === norm.length || SENTENCE_BREAK.test(c)) {
+      const end = i < norm.length && KEEP_BREAK.test(c) ? i + 1 : i;
+      if (end > start) ranges.push([start, end]);
+      start = i + 1;
+    }
+  }
+  return ranges;
+}
+
+function findRange(ranges, pos) {
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [s, e] = ranges[mid];
+    if (pos < s) hi = mid - 1;
+    else if (pos >= e) lo = mid + 1;
+    else return ranges[mid];
+  }
+  return [pos, pos];
+}
+
+function excerpt(text, ranges, pos, len) {
+  const [s, e] = findRange(ranges, pos);
+  let from = s;
+  let to = e;
+  if (to - from > LONG_SENTENCE) {
+    from = Math.max(s, pos - CONTEXT);
+    to = Math.min(e, pos + len + CONTEXT);
+  }
+  let out = text.slice(from, to).replace(/\s+/g, " ").trim();
+  if (from > s) out = `…${out}`;
+  if (to < e) out = `${out}…`;
+  return out;
+}
+
+function pushSentence(list, sentence) {
+  if (sentence && list.length < MAX_SENTENCES && !list.includes(sentence)) list.push(sentence);
+}
+
+export function buildMatcher(stocksData, rules = {}) {
+  const stocks = new Map(); // 代號 → { code, name, market }
+  const dict = new Map(); // 正規化後的名稱 → { tier, codes, ambiguous, ignore }
+  const lengthsByFirstChar = new Map(); // 第一個字 → 可能的長度（由長到短，用來找最長的名稱）
+  const keysByCode = new Map(); // 代號 → 所有名稱（標示原文用）
+
+  function register(key, tier) {
+    let e = dict.get(key);
+    if (!e) {
+      e = { tier, codes: new Set(), ambiguous: false, ignore: false };
+      dict.set(key, e);
+      const lens = lengthsByFirstChar.get(key[0]) ?? [];
+      if (!lens.includes(key.length)) {
+        lens.push(key.length);
+        lens.sort((a, b) => b - a);
+      }
+      lengthsByFirstChar.set(key[0], lens);
+    }
+    return e;
+  }
+
+  function addName(raw, code, tier) {
+    const key = normalize(raw).replace(/\s+/g, "");
+    if (key.length < 2) return;
+    const e = register(key, tier);
+    if (tier < e.tier) {
+      e.tier = tier;
+      e.codes = new Set();
+    }
+    if (tier === e.tier) e.codes.add(code);
+    const keys = keysByCode.get(code) ?? [];
+    if (!keys.includes(key)) keys.push(key);
+    keysByCode.set(code, keys);
+  }
+
+  for (const [code, name, market, aliases] of stocksData.stocks) {
+    stocks.set(code, { code, name, market });
+    addName(name, code, TIER_OFFICIAL);
+    // 「世芯-KY」新聞常寫成「世芯」或「世芯KY」；創新板的「-創」也一樣
+    const base = name.replace(/-(?:KY創|KY|創)$/, "");
+    if (base !== name) {
+      addName(base, code, TIER_OFFICIAL);
+      if (name.includes("KY")) addName(`${base}KY`, code, TIER_OFFICIAL);
+    }
+    for (const alias of aliases) addName(alias, code, TIER_DERIVED);
+  }
+  for (const [alias, code] of Object.entries(rules.aliases ?? {})) {
+    if (stocks.has(code)) addName(alias, code, TIER_MANUAL);
+  }
+  for (const word of rules.ambiguous ?? []) {
+    const e = dict.get(normalize(word));
+    if (e) e.ambiguous = true;
+  }
+  for (const word of rules.ignore ?? []) {
+    register(normalize(word), TIER_IGNORE_ONLY).ignore = true;
+  }
+
+  // 從左到右，每個位置找最長的名稱
+  function scanNames(norm) {
+    const tokens = [];
+    for (let i = 0; i < norm.length; i++) {
+      const lens = lengthsByFirstChar.get(norm[i]);
+      if (!lens) continue;
+      for (const len of lens) {
+        if (i + len > norm.length) continue;
+        const key = norm.slice(i, i + len);
+        const e = dict.get(key);
+        if (!e) continue;
+        // 英文名稱要整個字對上（ASUS 不能對到 ASUSTEK 的一部分）
+        if (isAsciiWordChar(key[0]) && isAsciiWordChar(norm[i - 1])) continue;
+        if (isAsciiWordChar(key[len - 1]) && isAsciiWordChar(norm[i + len])) continue;
+        tokens.push({ start: i, end: i + len, entry: e });
+        i += len - 1;
+        break;
+      }
+    }
+    return tokens;
+  }
+
+  function scanCodes(norm) {
+    const tokens = [];
+    for (const re of [BRACKET_CODE, SUFFIX_CODE]) {
+      for (const m of norm.matchAll(re)) tokens.push({ start: m.index, end: m.index + m[0].length, code: m[1] });
+    }
+    return tokens;
+  }
+
+  // 名稱後面（或前面）緊接著的括號代號，例如「台積電(2330)」「台積電 (2330)」。
+  // 前面的代號如果已經屬於更前面的名稱（「台積電(2330)聯電」），就不算
+  function adjacentCodeToken(norm, token, codeTokens, usedCodes) {
+    for (const c of codeTokens) {
+      if (c.start >= token.end && c.start - token.end <= 2 && !norm.slice(token.end, c.start).trim()) return c;
+    }
+    for (const c of codeTokens) {
+      if (usedCodes.has(c)) continue;
+      if (c.end <= token.start && token.start - c.end <= 1 && !norm.slice(c.end, token.start).trim()) return c;
+    }
+    return null;
+  }
+
+  // 沒有括號、直接黏在名稱旁邊的四位數，例如「2330 台積電」「統一1216」。
+  // 這種數字也可能是年份或價格，所以只拿來「確認」，不拿來判斷衝突
+  function bareAdjacentCode(norm, token) {
+    const after = /^\s?(\d{4})(?!\d)/.exec(norm.slice(token.end, token.end + 6));
+    const before = /(?<![\d.,])(\d{4})\s?$/.exec(norm.slice(Math.max(0, token.start - 6), token.start));
+    return [after?.[1], before?.[1]].filter(Boolean);
+  }
+
+  function describe(code) {
+    const s = stocks.get(code);
+    return s ? `${s.code} ${s.name}` : code;
+  }
+
+  // 主要入口：回傳 { title, mentions: [{ status: "ok", code, sentences } | { status: "pending", raw, reason, candidates, sentences }] }
+  function analyze(text) {
+    const norm = normalize(text);
+    const ranges = sentenceRanges(norm);
+    const nameTokens = scanNames(norm);
+    const codeTokens = scanCodes(norm);
+    const usedCodes = new Set();
+    const hits = []; // 依出現順序
+
+    for (const t of nameTokens) {
+      const e = t.entry;
+      const raw = text.slice(t.start, t.end);
+      const codes = [...e.codes];
+      const adj = adjacentCodeToken(norm, t, codeTokens, usedCodes);
+      if (adj) usedCodes.add(adj);
+
+      const confirming = [adj?.code, ...bareAdjacentCode(norm, t)].find((c) => c && e.codes.has(c));
+      if (confirming) {
+        hits.push({ pos: t.start, len: t.end - t.start, status: "ok", code: confirming });
+        continue;
+      }
+      if (adj && !e.ignore) {
+        const codeStock = stocks.get(adj.code);
+        hits.push({
+          pos: t.start,
+          len: adj.end - t.start,
+          status: "pending",
+          kind: "conflict",
+          raw: text.slice(Math.min(t.start, adj.start), Math.max(t.end, adj.end)),
+          reason: codeStock
+            ? `名稱「${raw}」和代號 ${adj.code}（${codeStock.name}）對不起來`
+            : `代號 ${adj.code} 不在上市櫃清單裡，名稱是「${raw}」`,
+          candidates: [...codes, ...(codeStock && !codes.includes(adj.code) ? [adj.code] : [])],
+        });
+        continue;
+      }
+      if (adj) usedCodes.delete(adj); // 一般詞彙旁邊的代號，讓代號自己決定
+      if (e.ignore || codes.length === 0) continue;
+      if (codes.length > 1) {
+        hits.push({
+          pos: t.start,
+          len: t.end - t.start,
+          status: "pending",
+          kind: "multi",
+          raw,
+          reason: `「${raw}」對到不只一檔：${codes.map(describe).join("、")}`,
+          candidates: codes,
+        });
+      } else if (e.ambiguous) {
+        hits.push({
+          pos: t.start,
+          len: t.end - t.start,
+          status: "pending",
+          kind: "ambiguous",
+          raw,
+          reason: `「${raw}」也常當一般用語或指其他公司，請確認是不是 ${describe(codes[0])}`,
+          candidates: codes,
+        });
+      } else {
+        hits.push({ pos: t.start, len: t.end - t.start, status: "ok", code: codes[0] });
+      }
+    }
+
+    for (const c of codeTokens) {
+      if (usedCodes.has(c)) continue;
+      if (stocks.has(c.code)) {
+        hits.push({ pos: c.start, len: c.end - c.start, status: "ok", code: c.code });
+      } else {
+        // 把括號前面幾個字一起顯示，比較看得出在講哪一家
+        const before = /[\p{L}\p{N}-]{0,6}$/u.exec(text.slice(Math.max(0, c.start - 6), c.start))?.[0] ?? "";
+        hits.push({
+          pos: c.start,
+          len: c.end - c.start,
+          status: "pending",
+          kind: "unknown",
+          raw: `${before}${text.slice(c.start, c.end)}`,
+          reason: `代號 ${c.code} 不在上市櫃清單裡（可能是 ETF、興櫃或剛上市）`,
+          candidates: [],
+        });
+      }
+    }
+    hits.sort((a, b) => a.pos - b.pos);
+
+    // 以個股合併；待確認以「原文 + 候選」合併
+    const confirmed = new Map();
+    const pending = new Map();
+    for (const h of hits) {
+      const sentence = excerpt(text, ranges, h.pos, h.len);
+      if (h.status === "ok") {
+        const item = confirmed.get(h.code) ?? { status: "ok", code: h.code, sentences: [] };
+        pushSentence(item.sentences, sentence);
+        confirmed.set(h.code, item);
+      } else {
+        const key = `${normalize(h.raw)}|${h.candidates.join(",")}|${h.reason}`;
+        const item = pending.get(key) ?? {
+          status: "pending",
+          kind: h.kind,
+          raw: h.raw,
+          reason: h.reason,
+          candidates: h.candidates,
+          sentences: [],
+        };
+        pushSentence(item.sentences, sentence);
+        pending.set(key, item);
+      }
+    }
+    // 同一則裡已經確定的個股（例如前面寫了「統一(1216)」），後面同名的一般詞彙就直接併進去。
+    // 對到多檔的（「台南」可能是台南或台南-KY）不併，前面確定一檔不代表後面講的也是同一檔
+    for (const [key, item] of pending) {
+      if (item.kind === "ambiguous" && confirmed.has(item.candidates[0])) {
+        for (const s of item.sentences) pushSentence(confirmed.get(item.candidates[0]).sentences, s);
+        pending.delete(key);
+      }
+    }
+    return { title: makeTitle(text), mentions: [...confirmed.values(), ...pending.values()] };
+  }
+
+  // 手動新增、改成其他個股時的搜尋：代號開頭，或名稱、別名包含輸入的字
+  function search(query, limit = 8) {
+    const q = normalize(query.trim()).replace(/\s+/g, "");
+    if (!q) return [];
+    const scored = [];
+    for (const s of stocks.values()) {
+      let score = -1;
+      if (s.code === q) score = 0;
+      else if (s.code.startsWith(q)) score = 1;
+      else {
+        const name = normalize(s.name);
+        if (name === q) score = 0;
+        else if (name.startsWith(q)) score = 2;
+        else if (name.includes(q)) score = 3;
+        else if ((keysByCode.get(s.code) ?? []).some((k) => k.includes(q))) score = 4;
+      }
+      if (score >= 0) scored.push([score, s]);
+    }
+    scored.sort((a, b) => a[0] - b[0] || a[1].code.localeCompare(b[1].code));
+    return scored.slice(0, limit).map(([, s]) => s);
+  }
+
+  // 在句子裡找出這檔股票的名稱或代號出現的位置（畫面上標示用）
+  function highlightRanges(sentence, code, extra = []) {
+    const norm = normalize(sentence);
+    const keys = [...(keysByCode.get(code) ?? []), ...(code ? [code] : []), ...extra.map((x) => normalize(x))];
+    const found = [];
+    for (const key of keys) {
+      if (!key) continue;
+      for (let i = norm.indexOf(key); i >= 0; i = norm.indexOf(key, i + key.length)) found.push([i, i + key.length]);
+    }
+    found.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+    const merged = [];
+    for (const r of found) {
+      const last = merged[merged.length - 1];
+      if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+      else merged.push([...r]);
+    }
+    return merged;
+  }
+
+  return {
+    analyze,
+    search,
+    highlightRanges,
+    stock: (code) => stocks.get(code),
+    size: stocks.size,
+  };
+}

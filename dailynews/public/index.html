@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <title>今日清單 · 新聞標的整理</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <span class="brand">新聞標的整理</span>
+      <button class="link-button" id="logout" type="button">登出</button>
+    </header>
+    <main>
+      <section class="day-nav">
+        <button class="icon-button" id="prev-day" type="button" aria-label="前一個有資料的日子" title="前一個有資料的日子">‹</button>
+        <div class="day-heading">
+          <h1><span id="list-title">今日清單</span>（<span id="count">0</span> 檔）</h1>
+          <p class="date">
+            <span id="date"></span>
+            <label class="date-pick">
+              <span class="visually-hidden">切換日期</span>
+              <input type="date" id="date-picker" />
+            </label>
+          </p>
+        </div>
+        <button class="icon-button" id="next-day" type="button" aria-label="後一個有資料的日子" title="後一個有資料的日子">›</button>
+      </section>
+      <p class="back-today" id="back-today" hidden>
+        <button class="link-button" id="go-today" type="button">回到今日清單</button>
+      </p>
+
+      <section class="card paste">
+        <h2>貼上新聞或 memo</h2>
+        <label class="visually-hidden" for="paste-text">新聞或 memo 內容</label>
+        <textarea id="paste-text" rows="6" placeholder="一次貼一則（例如一篇新聞或一份券商 memo），第一行會當成標題。按「整理」後找出提到的個股，只會存標題和提到個股的句子。"></textarea>
+        <div class="paste-meta">
+          <span>會歸到 <strong id="paste-day">—</strong></span>
+          <button class="link-button small" id="paste-day-change" type="button">改日期</button>
+          <input type="date" id="paste-day-input" aria-label="這則要歸到哪一天" hidden />
+          <span class="muted" id="paste-day-note"></span>
+        </div>
+        <button class="primary" id="paste-submit" type="button">整理</button>
+        <p class="result" id="paste-result" role="status"></p>
+      </section>
+
+      <section class="pending" id="pending" hidden>
+        <h2>待確認（<span id="pending-count">0</span>）</h2>
+        <p class="muted">這些字可能是個股，也可能不是。選對的代號，或按「不是個股」。</p>
+        <div id="pending-list"></div>
+      </section>
+
+      <section class="card export" id="export" hidden>
+        <div class="export-head">
+          <h2>匯出到自選</h2>
+          <div class="pick-tools">
+            <button class="link-button small" id="pick-all" type="button">全選</button>
+            <button class="link-button small" id="pick-none" type="button">全部取消勾選</button>
+          </div>
+        </div>
+        <fieldset class="scope">
+          <legend class="visually-hidden">匯出範圍</legend>
+          <label><input type="radio" name="export-scope" value="all" /><span>當天全部（<span id="scope-all-count">0</span> 檔）</span></label>
+          <label><input type="radio" name="export-scope" value="picked" /><span>只匯出已勾選（<span id="scope-picked-count">0</span> 檔）</span></label>
+        </fieldset>
+        <div class="export-notes" id="export-notes"></div>
+        <div class="export-groups" id="export-groups"></div>
+      </section>
+
+      <section class="stocks" id="stock-list" aria-live="polite"></section>
+
+      <section class="card">
+        <h2>手動新增個股</h2>
+        <div id="add-stock"></div>
+      </section>
+
+      <section class="card">
+        <h2>這天貼入的資料（<span id="article-count">0</span> 則）</h2>
+        <ul class="articles" id="article-list"></ul>
+      </section>
+
+      <details class="card checker">
+        <summary>交易日檢查</summary>
+        <p class="muted">輸入任意時間（台灣時間），看貼入的資料會歸到哪一個交易日。</p>
+        <label class="visually-hidden" for="checker-input">貼入時間</label>
+        <input type="datetime-local" id="checker-input" />
+        <div class="checker-result" id="checker-result" role="status"></div>
+      </details>
+
+      <p class="status">資料庫：<span id="db">檢查中…</span><span id="data-info"></span></p>
+    </main>
+    <dialog class="quick" id="quick" aria-labelledby="quick-group">
+      <div class="quick-top">
+        <p class="quick-title"><strong id="quick-group"></strong> <span class="muted" id="quick-progress"></span></p>
+        <button class="link-button" id="quick-close" type="button">關閉</button>
+      </div>
+      <div class="quick-bar" aria-hidden="true"><div id="quick-bar-fill"></div></div>
+      <p class="muted quick-added" id="quick-added"></p>
+
+      <div class="quick-main" id="quick-main">
+        <button class="quick-code" id="quick-code" type="button"></button>
+        <p class="quick-name" id="quick-name"></p>
+        <p class="quick-state" id="quick-state">
+          <span class="ok">✓ 已加入</span>
+          <button class="link-button small" id="quick-unmark" type="button">取消標記</button>
+        </p>
+        <p class="muted quick-hint" id="quick-hint" role="status"></p>
+      </div>
+
+      <div class="quick-done" id="quick-done" hidden>
+        <p class="quick-done-title">這組看完了</p>
+        <p class="muted" id="quick-remaining"></p>
+        <button class="secondary big" id="quick-first-missing" type="button">跳到第一檔還沒加入的</button>
+        <button class="secondary big" id="quick-restart" type="button">從第一檔再看一次</button>
+      </div>
+
+      <div class="quick-actions">
+        <button class="primary big" id="quick-add-next" type="button">已加入，下一檔</button>
+        <div class="quick-nav">
+          <button class="secondary big" id="quick-prev" type="button">‹ 上一檔</button>
+          <button class="secondary big" id="quick-next" type="button">下一檔 ›</button>
+        </div>
+      </div>
+    </dialog>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "dailynews",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler d1 migrations apply DB --local && wrangler dev",
+    "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "types": "wrangler types",
+    "check": "wrangler types && tsc --noEmit",
+    "update-data": "node scripts/update-data.mjs",
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wrangler": "4.151.3"
+  }
+}

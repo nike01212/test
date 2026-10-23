@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dailynews",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 8787
+    },
+    {
+      "name": "dailynews-8788",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "npx wrangler d1 migrations apply DB --local --persist-to .wrangler/state-8788 && npx wrangler dev --port 8788 --persist-to .wrangler/state-8788"
+      ],
+      "port": 8788
+    }
+  ]
+}

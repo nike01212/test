@@ -1,0 +1,26 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "dailynews",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+	"workers_dev": true,
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		// 每個請求都先經過 Worker 檢查密碼，靜態頁面才不會被直接打開
+		"run_worker_first": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "dailynews",
+			// 第一次部署時 wrangler 會自動建立資料庫，並把 database_id 寫回這裡
+			"migrations_dir": "migrations",
+			"database_id": "4a884119-e9d6-4ff6-92ff-046bfc3aca75"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+	// 群組密碼不放在這裡：用 `npx wrangler secret put GROUP_PASSWORD` 設定
+}
