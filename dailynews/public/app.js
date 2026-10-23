@@ -4,6 +4,7 @@ import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
 import { isPersistent, loadCodes, pruneOld, saveCodes } from "/marks.js";
 import { recognize } from "/ocr.js";
 import { extractUrl, splitPaste } from "/split.js";
+import { buildTagger, describeLabels } from "/tagger.js";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -15,7 +16,10 @@ const state = {
   data: null, // /api/list 的回應
   stocks: [], // groupStocks 的結果（已依被提到的則數排好）
   matcher: null,
+  tagger: null, // 標籤和國際大廠名單；null 還在讀，false 讀取失敗（照樣可以送出，只是沒有標籤）
   dataInfo: "",
+  tagInfo: "",
+  labelEdit: null, // 正在改標籤的那一檔：{ code, base: { tags, partners }, tags: Set, partners: Set }
   pasteDay: null, // 手動改的「會歸到」日期；null 代表照規則
   picked: new Set(), // 這天勾選的代號（只存在這台裝置）
   added: new Set(), // 逐檔快速加入時標記「已加入」的代號（只存在這台裝置）
@@ -202,6 +206,7 @@ async function loadList(date) {
     state.added = loadCodes("added", data.date);
     // 有勾選就預設只匯出勾選的
     state.exportScope = state.picked.size ? "picked" : "all";
+    state.labelEdit = null;
   }
   state.data = data;
   state.date = data.date;
@@ -219,9 +224,10 @@ function groupStocks(data) {
     if (m.status !== "ok") continue;
     let s = stocks.get(m.code);
     if (!s) {
-      s = { code: m.code, name: m.name, market: m.market, sources: new Map(), manual: false };
+      s = { code: m.code, name: m.name, market: m.market, sources: new Map(), manual: false, rows: [] };
       stocks.set(m.code, s);
     }
+    s.rows.push(m); // 標籤、合作對象是每一則各自存的，畫面上合起來
     if (m.article_id === null) {
       s.manual = true;
       continue;
@@ -232,8 +238,18 @@ function groupStocks(data) {
     }
     s.sources.set(m.article_id, src);
   }
+  for (const s of stocks.values()) Object.assign(s, unionLabels(s.rows));
   // 被越多則提到的排越前面
   return [...stocks.values()].sort((a, b) => b.sources.size - a.sources.size || a.code.localeCompare(b.code));
+}
+
+// 好幾則的標籤、合作對象合在一起；設定檔讀到了就依設定檔的順序
+function unionLabels(rows) {
+  if (state.tagger) return state.tagger.union(rows);
+  return {
+    tags: [...new Set(rows.flatMap((m) => m.tags ?? []))],
+    partners: [...new Set(rows.flatMap((m) => m.partners ?? []))],
+  };
 }
 
 function groupPending(data) {
@@ -323,7 +339,7 @@ function renderStock(s) {
   const picked = state.picked.has(s.code);
   const card = h(
     "article",
-    { class: `card stock${picked ? " picked" : ""}` },
+    { class: `card stock${picked ? " picked" : ""}`, "data-code": s.code },
     h(
       "header",
       { class: "stock-head" },
@@ -353,9 +369,161 @@ function renderStock(s) {
         "刪除",
       ),
     ),
+    renderLabels(s),
     count ? h("ul", { class: "sources" }, [...s.sources.values()].map((src) => renderSource(src, s.code))) : null,
   );
   return card;
+}
+
+// ---- 標籤與合作對象 ----
+
+function labelChips(tags) {
+  return tags.map((t) => h("span", { class: "label-chip" }, t));
+}
+
+function renderLabels(s) {
+  if (state.labelEdit?.code === s.code) return renderLabelEditor(s);
+  const empty = s.tags.length === 0 && s.partners.length === 0;
+  return h(
+    "div",
+    { class: "stock-labels" },
+    labelChips(s.tags),
+    s.partners.length
+      ? h("span", { class: "partners" }, h("span", { class: "muted" }, "合作對象 "), s.partners.join("、"))
+      : null,
+    h(
+      "button",
+      {
+        type: "button",
+        class: "link-button small",
+        "aria-label": `${empty ? "加" : "改"} ${s.code} ${s.name} 的標籤`,
+        onclick: (e) => openLabelEdit(s, e.target),
+      },
+      empty ? "加標籤" : "改標籤",
+    ),
+  );
+}
+
+function openLabelEdit(s, button) {
+  state.labelEdit = {
+    code: s.code,
+    base: { tags: [...s.tags], partners: [...s.partners] },
+    tags: new Set(s.tags),
+    partners: new Set(s.partners),
+    saving: false,
+  };
+  const card = button.closest(".stock");
+  redrawLabels(s, card);
+  card?.querySelector(".label-editor input")?.focus();
+}
+
+// 只重畫這一檔的標籤區，勾到一半的不會因為整個清單重畫而跳掉
+function redrawLabels(s, card) {
+  card?.querySelector(".stock-labels, .label-editor")?.replaceWith(renderLabels(s));
+}
+
+function labelOption(set, value, name) {
+  return h(
+    "label",
+    { class: "label-option" },
+    h("input", {
+      type: "checkbox",
+      name,
+      checked: set.has(value),
+      onchange: (e) => (e.target.checked ? set.add(value) : set.delete(value)),
+    }),
+    h("span", {}, value),
+  );
+}
+
+function renderLabelEditor(s) {
+  const edit = state.labelEdit;
+  const tagger = state.tagger || null;
+  // 設定檔裡的標籤，加上已經存下來、但設定檔裡沒有的（改名或刪掉的），才拿得掉
+  const tagNames = [...new Set([...(tagger?.tagNames ?? []), ...edit.base.tags])];
+  const partnerList = [...edit.base.partners, ...edit.partners];
+  const partnerNames = tagger ? tagger.sortPartners(partnerList) : [...new Set(partnerList)];
+  const addable = (tagger?.companyLabels ?? []).filter((c) => !partnerNames.includes(c));
+  const editor = h(
+    "div",
+    { class: "label-editor" },
+    h(
+      "fieldset",
+      {},
+      h("legend", {}, "標籤"),
+      tagNames.length
+        ? tagNames.map((t) => labelOption(edit.tags, t, `tags-${s.code}`))
+        : h("span", { class: "muted" }, state.tagger === null ? "標籤設定載入中…" : "標籤設定讀取失敗（public/data/tags.json）"),
+    ),
+    h(
+      "fieldset",
+      {},
+      h("legend", {}, "合作對象"),
+      partnerNames.map((p) => labelOption(edit.partners, p, `partners-${s.code}`)),
+      addable.length
+        ? h(
+            "select",
+            {
+              class: "partner-add",
+              "aria-label": `幫 ${s.code} ${s.name} 加合作對象`,
+              onchange: (e) => {
+                if (!e.target.value) return;
+                edit.partners.add(e.target.value);
+                redrawLabels(s, e.target.closest(".stock"));
+              },
+            },
+            h("option", { value: "" }, "加合作對象…"),
+            addable.map((c) => h("option", { value: c }, c)),
+          )
+        : null,
+    ),
+    h("p", { class: "muted label-help" }, "改的是這一天的這一檔，提到它的每一則都會一起改。"),
+    h(
+      "div",
+      { class: "label-actions" },
+      h("button", { type: "button", class: "primary", disabled: edit.saving, onclick: () => saveLabelEdit(s) }, edit.saving ? "儲存中…" : "儲存"),
+      h(
+        "button",
+        {
+          type: "button",
+          class: "secondary",
+          onclick: (e) => {
+            const card = e.target.closest(".stock");
+            state.labelEdit = null;
+            redrawLabels(s, card);
+          },
+        },
+        "取消",
+      ),
+    ),
+  );
+  return editor;
+}
+
+async function saveLabelEdit(s) {
+  const edit = state.labelEdit;
+  if (!edit || edit.saving) return;
+  const change = (now, base) => ({ add: [...now].filter((x) => !base.includes(x)), remove: base.filter((x) => !now.has(x)) });
+  const tags = change(edit.tags, edit.base.tags);
+  const partners = change(edit.partners, edit.base.partners);
+  const card = $("stock-list").querySelector(`[data-code="${s.code}"]`);
+  if (!tags.add.length && !tags.remove.length && !partners.add.length && !partners.remove.length) {
+    state.labelEdit = null;
+    redrawLabels(s, card);
+    return;
+  }
+  edit.saving = true;
+  redrawLabels(s, card);
+  try {
+    await api("/api/stocks", { method: "PATCH", body: { date: state.date, code: s.code, tags, partners } });
+    state.labelEdit = null;
+    toast(`已更新 ${s.code} ${s.name} 的標籤`);
+    await loadList(state.date);
+  } catch (err) {
+    edit.saving = false;
+    redrawLabels(s, $("stock-list").querySelector(`[data-code="${s.code}"]`));
+    toast(err.message, "bad");
+  }
 }
 
 // ---- 匯出 ----
@@ -605,7 +773,7 @@ function renderPasteDay() {
 }
 
 function renderDataInfo() {
-  $("data-info").textContent = state.dataInfo;
+  $("data-info").textContent = state.dataInfo + state.tagInfo;
 }
 
 // ---- 動作 ----
@@ -622,7 +790,7 @@ async function run(action) {
 
 const BODY_PREVIEW = 1500; // 「看抓到的內容」最多顯示幾個字
 const TITLE_NOTE = 80; // 文字改成網址時，剩下的字在這個長度以內、只有一行，才當成分享文字
-const MENTION_FIELDS = ["status", "code", "raw", "reason", "candidates", "sentences"];
+const MENTION_FIELDS = ["status", "code", "raw", "reason", "candidates", "sentences", "tags", "partners"];
 
 function newItem(fields) {
   return {
@@ -697,7 +865,13 @@ function itemState(item) {
   const content = itemContent(item);
   if (!content.trim()) return { kind: "blocked", message: "沒有內容，不會送出。" };
   if (!state.matcher) return { kind: "busy", message: "代號清單載入中…" };
-  if (item.cache?.content !== content) item.cache = { content, analysis: state.matcher.analyze(content) };
+  // 標籤要在送出前判斷好（不存全文，送出後不能重算），所以等設定檔讀完；讀取失敗就照樣送出、不貼標籤
+  if (state.tagger === null) return { kind: "busy", message: "標籤設定載入中…" };
+  if (item.cache?.content !== content || item.cache.tagger !== state.tagger) {
+    const analysis = state.matcher.analyze(content);
+    if (state.tagger) analysis.mentions = state.tagger.tagMentions(content, analysis.mentions);
+    item.cache = { content, tagger: state.tagger, analysis };
+  }
   const { analysis } = item.cache;
   if (analysis.mentions.length === 0) return { kind: "none", message: "沒有找到個股，送出時會略過。" };
   return { kind: "ready", analysis };
@@ -840,7 +1014,7 @@ function urlBody(item, index) {
           "自己補貼內文",
         )
       : null,
-    showBox ? textBox(item, index, "把內文貼在這裡（只會存標題、網址和提到個股的句子）") : null,
+    showBox ? textBox(item, index, "把內文貼在這裡（只會存標題、網址、提到個股的句子和標籤）") : null,
   ];
 }
 
@@ -903,12 +1077,33 @@ function foundLine(item, st) {
   }
   const ok = st.analysis.mentions.filter((m) => m.status === "ok");
   const pending = st.analysis.mentions.filter((m) => m.status === "pending");
+  // 每檔的標籤放在提示文字裡（提到好幾檔時，每檔只看提到它的段落，可能不一樣）
+  const labelsOf = (m) => describeLabels(m) || undefined;
   return h(
     "p",
     { class: "found" },
     h("span", { class: "muted" }, `找到 ${ok.length} 檔${pending.length ? `、${pending.length} 個待確認` : ""}：`),
-    ok.map((m) => h("span", { class: "chip" }, stockLabel(m.code))),
-    pending.map((m) => h("span", { class: "chip pending-chip", title: m.reason }, `待確認：${m.raw}`)),
+    ok.map((m) => h("span", { class: "chip", title: labelsOf(m) }, stockLabel(m.code))),
+    pending.map((m) => h("span", { class: "chip pending-chip", title: [m.reason, labelsOf(m)].filter(Boolean).join("\n") }, `待確認：${m.raw}`)),
+  );
+}
+
+// 預覽上的標籤和合作對象（這一則所有個股合起來）
+function labelLine(st) {
+  if (st.kind !== "ready") return h("p", { class: "found-labels", hidden: true });
+  if (state.tagger === false) return h("p", { class: "found-labels warn" }, "標籤設定讀取失敗，這則送出時不會有標籤和合作對象。");
+  const mentions = st.analysis.mentions;
+  const { tags, partners } = state.tagger.union(mentions);
+  const key = (m) => `${m.tags.join()}|${m.partners.join()}`;
+  const differs = mentions.some((m) => key(m) !== key(mentions[0]));
+  return h(
+    "p",
+    { class: "found-labels" },
+    h("span", { class: "muted" }, "標籤："),
+    tags.length ? labelChips(tags) : h("span", { class: "muted" }, "沒有"),
+    h("span", { class: "muted" }, "合作對象："),
+    partners.length ? h("span", {}, partners.join("、")) : h("span", { class: "muted" }, "沒有"),
+    differs ? h("span", { class: "muted" }, "（每檔只看提到它的段落，各檔不一樣，送出後在清單上看）") : null,
   );
 }
 
@@ -950,6 +1145,7 @@ function renderItem(item, index) {
     item.type === "image" ? fieldBox(item, index, "source", "出處", "例如：B3 上市櫃 | 2026.10.22 | 工商時報") : null,
     item.type !== "url" ? textBox(item, index, item.type === "image" ? "辨識出來的文字" : "這則的內容") : null,
     foundLine(item, st),
+    labelLine(st),
     item.error ? h("p", { class: "bad item-error" }, item.error) : null,
   );
 }
@@ -967,6 +1163,7 @@ function scheduleItemInfo(item) {
       card.className = `preview-item ${st.kind}`;
       card.querySelector(".item-title").textContent = itemTitle(item);
       card.querySelector(".found").replaceWith(foundLine(item, st));
+      card.querySelector(".found-labels").replaceWith(labelLine(st));
       const urlOption = card.querySelector('.type-select option[value="url"]');
       if (urlOption && item.type !== "url") urlOption.disabled = !extractUrl(item.text);
       renderPreviewFooter();
@@ -1304,18 +1501,37 @@ async function runChecker() {
   }
 }
 
+async function fetchJson(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`${path} 讀取失敗`);
+  try {
+    return await res.json();
+  } catch {
+    throw new Error(`${path} 格式錯誤（可能少了逗號或引號）`);
+  }
+}
+
 async function loadMatcher() {
-  const [stocks, rules] = await Promise.all(
-    ["/data/stocks.json", "/data/name-rules.json"].map(async (path) => {
-      const res = await fetch(path);
-      if (!res.ok) throw new Error(`${path} 讀取失敗`);
-      return res.json();
-    }),
-  );
+  const [stocks, rules] = await Promise.all(["/data/stocks.json", "/data/name-rules.json"].map(fetchJson));
   state.matcher = buildMatcher(stocks, rules);
   state.dataInfo = ` · 代號清單 ${state.matcher.size.toLocaleString()} 檔（${stocks.updated} 更新）`;
   renderDataInfo();
   if (state.data) render(); // 補上待確認候選的名稱、句子裡的標示
+  renderPreview();
+}
+
+// 標籤和國際大廠名單（發起人手動維護的設定檔）。讀不到不影響貼入，只是這段時間送出的沒有標籤
+async function loadTagger() {
+  try {
+    const [tags, companies] = await Promise.all(["/data/tags.json", "/data/big-companies.json"].map(fetchJson));
+    state.tagger = buildTagger(tags, companies);
+    state.tagInfo = ` · 標籤 ${state.tagger.tagNames.length} 個、國際大廠 ${state.tagger.companyLabels.length} 家（${companies.updated ?? "沒寫日期"}）`;
+  } catch (err) {
+    state.tagger = false;
+    toast(`標籤設定讀取失敗：${err.message}。送出的資料不會有標籤和合作對象。`, "bad");
+  }
+  renderDataInfo();
+  if (state.data) render(); // 依設定檔的順序排標籤
   renderPreview();
 }
 
@@ -1450,6 +1666,7 @@ $("checker-input").value = taipeiNowLocal();
 runChecker();
 pruneOld(taipeiNowLocal().slice(0, 10));
 loadMatcher().catch((err) => toast(`代號清單讀取失敗：${err.message}`, "bad"));
+loadTagger();
 loadList(new URLSearchParams(location.search).get("date")).catch((err) => {
   $("db").textContent = "讀取失敗";
   $("db").className = "bad";

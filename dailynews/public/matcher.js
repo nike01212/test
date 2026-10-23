@@ -199,7 +199,8 @@ export function buildMatcher(stocksData, rules = {}) {
     return s ? `${s.code} ${s.name}` : code;
   }
 
-  // 主要入口：回傳 { title, mentions: [{ status: "ok", code, sentences } | { status: "pending", raw, reason, candidates, sentences }] }
+  // 主要入口：回傳 { title, mentions: [{ status: "ok", code, sentences } | { status: "pending", raw, reason, candidates, sentences }] }。
+  // 每個 mention 另外有 spans：在原文裡出現的位置 [開始, 結束]，給標籤判斷用（public/tagger.js），不會送到伺服器
   function analyze(text) {
     const norm = normalize(text);
     const ranges = sentenceRanges(norm);
@@ -288,8 +289,9 @@ export function buildMatcher(stocksData, rules = {}) {
     for (const h of hits) {
       const sentence = excerpt(text, ranges, h.pos, h.len);
       if (h.status === "ok") {
-        const item = confirmed.get(h.code) ?? { status: "ok", code: h.code, sentences: [] };
+        const item = confirmed.get(h.code) ?? { status: "ok", code: h.code, sentences: [], spans: [] };
         pushSentence(item.sentences, sentence);
+        item.spans.push([h.pos, h.pos + h.len]);
         confirmed.set(h.code, item);
       } else {
         const key = `${normalize(h.raw)}|${h.candidates.join(",")}|${h.reason}`;
@@ -300,8 +302,10 @@ export function buildMatcher(stocksData, rules = {}) {
           reason: h.reason,
           candidates: h.candidates,
           sentences: [],
+          spans: [],
         };
         pushSentence(item.sentences, sentence);
+        item.spans.push([h.pos, h.pos + h.len]);
         pending.set(key, item);
       }
     }
@@ -309,7 +313,9 @@ export function buildMatcher(stocksData, rules = {}) {
     // 對到多檔的（「台南」可能是台南或台南-KY）不併，前面確定一檔不代表後面講的也是同一檔
     for (const [key, item] of pending) {
       if (item.kind === "ambiguous" && confirmed.has(item.candidates[0])) {
-        for (const s of item.sentences) pushSentence(confirmed.get(item.candidates[0]).sentences, s);
+        const target = confirmed.get(item.candidates[0]);
+        for (const s of item.sentences) pushSentence(target.sentences, s);
+        target.spans.push(...item.spans);
         pending.delete(key);
       }
     }

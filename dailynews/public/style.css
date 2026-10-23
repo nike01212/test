@@ -11,6 +11,8 @@
   --warn: #9a6700;
   --warn-bg: #fff8e1;
   --mark: #ffe58f;
+  --label-bg: #e8f0fe;
+  --label-text: #1a4fa0;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
   color-scheme: light dark;
 }
@@ -28,6 +30,8 @@
     --warn: #e3b341;
     --warn-bg: #2b2414;
     --mark: #6b5a1e;
+    --label-bg: #1c2a40;
+    --label-text: #9cc1ff;
   }
 }
 
@@ -710,6 +714,106 @@ mark {
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* 標籤與合作對象 */
+.stock-labels,
+.found-labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 0.9rem;
+}
+
+.stock-labels {
+  margin-top: 8px;
+}
+
+.found-labels {
+  margin: 4px 0 0;
+  gap: 4px 6px;
+}
+
+.label-chip {
+  font-size: 0.8rem;
+  border-radius: 999px;
+  padding: 0 8px;
+  background: var(--label-bg);
+  color: var(--label-text);
+  white-space: nowrap;
+}
+
+.partners {
+  overflow-wrap: anywhere;
+}
+
+.label-editor {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.label-editor fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.label-editor legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.label-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.label-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.label-option:has(input:checked) {
+  background: var(--label-bg);
+  border-color: var(--label-text);
+  color: var(--label-text);
+}
+
+.partner-add {
+  padding: 4px 8px;
+}
+
+.label-help {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.label-actions {
+  display: flex;
+  gap: 8px;
 }
 
 /* 勾選 */

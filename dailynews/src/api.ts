@@ -20,6 +20,10 @@ const MAX_URL_LENGTH = 1000;
 const MAX_MENTIONS_PER_ARTICLE = 200;
 const MAX_CANDIDATES = 10;
 const MAX_IDS = 50;
+// 標籤、合作對象（第 5 步）：瀏覽器依 public/data/ 的設定檔判斷好送來，這裡只整理格式，不對照設定檔
+// （設定檔改名或刪掉的標籤，已經存下來的還要能顯示、能拿掉）
+const MAX_LABELS = 20;
+const MAX_LABEL_LENGTH = 40;
 
 interface MentionRow {
   id: number;
@@ -32,6 +36,8 @@ interface MentionRow {
   reason: string | null;
   candidates: string | null;
   sentences: string;
+  tags: string;
+  partners: string;
 }
 
 function nowSeconds(): number {
@@ -61,6 +67,18 @@ function cleanSentences(v: unknown): string[] {
     const text = cleanText(s, MAX_SENTENCE_LENGTH);
     if (text && !out.includes(text)) out.push(text);
     if (out.length >= MAX_SENTENCES) break;
+  }
+  return out;
+}
+
+// 標籤或合作對象的清單：去掉重複和空的，太長的截掉
+function cleanLabels(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v) {
+    const label = cleanText(x, MAX_LABEL_LENGTH);
+    if (label && !out.includes(label)) out.push(label);
+    if (out.length >= MAX_LABELS) break;
   }
   return out;
 }
@@ -113,7 +131,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
       "SELECT id, title, url, kind, source, body, pasted_at FROM articles WHERE trading_day = ? ORDER BY pasted_at, id",
     ).bind(date),
     env.DB.prepare(
-      "SELECT id, article_id, code, name, market, status, raw, reason, candidates, sentences FROM mentions WHERE trading_day = ? ORDER BY id",
+      "SELECT id, article_id, code, name, market, status, raw, reason, candidates, sentences, tags, partners FROM mentions WHERE trading_day = ? ORDER BY id",
     ).bind(date),
     // 前後「有資料的日子」，用索引直接找，不用掃整張表
     env.DB.prepare("SELECT MAX(trading_day) AS d FROM mentions WHERE trading_day < ?").bind(date),
@@ -130,11 +148,13 @@ async function handleList(url: URL, env: Env): Promise<Response> {
       ...m,
       candidates: parseJsonArray(m.candidates),
       sentences: parseJsonArray(m.sentences),
+      tags: parseJsonArray(m.tags),
+      partners: parseJsonArray(m.partners),
     })),
   });
 }
 
-// POST /api/articles：瀏覽器比對完的結果。內容是標題、網址、出處和擷取句；圖片另外存辨識出來的全文
+// POST /api/articles：瀏覽器比對完的結果。內容是標題、網址、出處、擷取句，以及每檔的標籤和合作對象；圖片另外存辨識出來的全文
 async function handleCreateArticle(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (!body) return badRequest("格式錯誤");
@@ -158,21 +178,29 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   if (!Array.isArray(body.mentions) || body.mentions.length === 0) return badRequest("這則沒有找到個股");
   if (body.mentions.length > MAX_MENTIONS_PER_ARTICLE) return badRequest("一則提到的個股太多了，請分開貼");
 
-  // 同一則裡同一檔只留一列，句子合併
-  const confirmed = new Map<string, string[]>();
-  const pending: { raw: string; reason: string; candidates: string[]; sentences: string[] }[] = [];
+  // 同一則裡同一檔只留一列，句子、標籤、合作對象合併
+  const confirmed = new Map<string, { sentences: string[]; tags: string[]; partners: string[] }>();
+  const pending: { raw: string; reason: string; candidates: string[]; sentences: string[]; tags: string[]; partners: string[] }[] =
+    [];
   for (const m of body.mentions as Record<string, unknown>[]) {
     if (!m || typeof m !== "object") return badRequest("格式錯誤");
     const sentences = cleanSentences(m.sentences);
+    const tags = cleanLabels(m.tags);
+    const partners = cleanLabels(m.partners);
     if (m.status === "ok") {
       if (!findStock(m.code)) return badRequest(`代號 ${String(m.code)} 不在上市櫃清單裡`);
       const code = m.code as string;
-      confirmed.set(code, cleanSentences([...(confirmed.get(code) ?? []), ...sentences]));
+      const prev = confirmed.get(code);
+      confirmed.set(code, {
+        sentences: cleanSentences([...(prev?.sentences ?? []), ...sentences]),
+        tags: cleanLabels([...(prev?.tags ?? []), ...tags]),
+        partners: cleanLabels([...(prev?.partners ?? []), ...partners]),
+      });
     } else if (m.status === "pending") {
       const candidates = Array.isArray(m.candidates)
         ? [...new Set(m.candidates.filter((c) => findStock(c)) as string[])].slice(0, MAX_CANDIDATES)
         : [];
-      pending.push({ raw: cleanText(m.raw, 40), reason: cleanText(m.reason, 100), candidates, sentences });
+      pending.push({ raw: cleanText(m.raw, 40), reason: cleanText(m.reason, 100), candidates, sentences, tags, partners });
     } else {
       return badRequest("格式錯誤");
     }
@@ -186,19 +214,38 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
       "INSERT INTO articles (trading_day, title, url, kind, source, body, pasted_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
     ).bind(tradingDay, title, url, kind, source, fullText, created),
   ];
-  for (const [code, sentences] of confirmed) {
+  for (const [code, c] of confirmed) {
     const s = findStock(code)!;
     statements.push(
       env.DB.prepare(
-        `INSERT INTO mentions (trading_day, article_id, code, name, market, status, sentences, created_at) VALUES (?, ${articleId}, ?, ?, ?, 'ok', ?, ?)`,
-      ).bind(tradingDay, s.code, s.name, s.market, JSON.stringify(sentences), created),
+        `INSERT INTO mentions (trading_day, article_id, code, name, market, status, sentences, tags, partners, created_at) VALUES (?, ${articleId}, ?, ?, ?, 'ok', ?, ?, ?, ?)`,
+      ).bind(
+        tradingDay,
+        s.code,
+        s.name,
+        s.market,
+        JSON.stringify(c.sentences),
+        JSON.stringify(c.tags),
+        JSON.stringify(c.partners),
+        created,
+      ),
     );
   }
+  // 待確認的也先存標籤：處理完變成某一檔時，標籤跟著過去
   for (const p of pending) {
     statements.push(
       env.DB.prepare(
-        `INSERT INTO mentions (trading_day, article_id, status, raw, reason, candidates, sentences, created_at) VALUES (?, ${articleId}, 'pending', ?, ?, ?, ?, ?)`,
-      ).bind(tradingDay, p.raw, p.reason, JSON.stringify(p.candidates), JSON.stringify(p.sentences), created),
+        `INSERT INTO mentions (trading_day, article_id, status, raw, reason, candidates, sentences, tags, partners, created_at) VALUES (?, ${articleId}, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        tradingDay,
+        p.raw,
+        p.reason,
+        JSON.stringify(p.candidates),
+        JSON.stringify(p.sentences),
+        JSON.stringify(p.tags),
+        JSON.stringify(p.partners),
+        created,
+      ),
     );
   }
   let results: D1Result[];
@@ -271,6 +318,41 @@ async function handleDeleteStock(url: URL, env: Env): Promise<Response> {
   return json({ ok: true });
 }
 
+// 「加哪些、拿掉哪些」：{ add: [...], remove: [...] }
+function cleanChange(v: unknown): { add: string[]; remove: string[] } {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  return { add: cleanLabels(o.add), remove: cleanLabels(o.remove) };
+}
+
+function applyChange(current: unknown[], change: { add: string[]; remove: string[] }): string[] {
+  const kept = cleanLabels(current).filter((x) => !change.remove.includes(x));
+  return cleanLabels([...kept, ...change.add.filter((x) => !change.remove.includes(x))]);
+}
+
+// PATCH /api/stocks {date, code, tags: {add, remove}, partners: {add, remove}}：手動改這天這一檔的標籤、合作對象。
+// 加的貼到提到這檔的每一則上，拿掉的從每一則拿掉。只送改了哪些，別人同時改了其他標籤也不會被蓋掉
+async function handleEditLabels(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body || !isIsoDate(body.date) || typeof body.code !== "string") return badRequest("缺少日期或代號");
+  const tags = cleanChange(body.tags);
+  const partners = cleanChange(body.partners);
+  const { results } = await env.DB.prepare(
+    "SELECT id, tags, partners FROM mentions WHERE trading_day = ? AND code = ? AND status = 'ok'",
+  )
+    .bind(body.date, body.code)
+    .all<{ id: number; tags: string; partners: string }>();
+  if (results.length === 0) return json({ error: "清單裡沒有這一檔" }, 404);
+  const statements: D1PreparedStatement[] = [];
+  for (const row of results) {
+    const nextTags = JSON.stringify(applyChange(parseJsonArray(row.tags), tags));
+    const nextPartners = JSON.stringify(applyChange(parseJsonArray(row.partners), partners));
+    if (nextTags === row.tags && nextPartners === row.partners) continue;
+    statements.push(env.DB.prepare("UPDATE mentions SET tags = ?, partners = ? WHERE id = ?").bind(nextTags, nextPartners, row.id));
+  }
+  if (statements.length) await env.DB.batch(statements);
+  return json({ ok: true, changed: statements.length });
+}
+
 // POST /api/pending/resolve {ids, code}：待確認改成某一檔；code 是 null 代表「不是個股」，直接刪掉
 async function handleResolve(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
@@ -316,6 +398,7 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   if (path === "/api/fetch" && method === "POST") return handleFetch(request, env);
   if (path === "/api/stocks" && method === "POST") return handleAddStock(request, env);
   if (path === "/api/stocks" && method === "DELETE") return handleDeleteStock(url, env);
+  if (path === "/api/stocks" && method === "PATCH") return handleEditLabels(request, env);
   if (path === "/api/pending/resolve" && method === "POST") return handleResolve(request, env);
 
   const articleMatch = /^\/api\/articles\/(\d+)$/.exec(path);

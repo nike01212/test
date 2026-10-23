@@ -125,3 +125,12 @@ test("新聞內文常見的「單日成交量」不是日成-KY", () => {
   assert.deepEqual(okCodes(r), []);
   assert.deepEqual(okCodes(matcher.analyze("日成-KY(4807)營收創高")), ["4807"]);
 });
+
+test("每檔記下在原文裡出現的位置（標籤判斷用）", () => {
+  const text = "統一(1216)公布營收。\n台積電擴產，統一今年展店。";
+  const r = matcher.analyze(text);
+  const uni = r.mentions.find((m) => m.code === "1216");
+  assert.deepEqual(uni.spans.map(([s, e]) => text.slice(s, e)), ["統一", "統一"]);
+  const tsmc = r.mentions.find((m) => m.code === "2330");
+  assert.deepEqual(tsmc.spans.map(([s, e]) => text.slice(s, e)), ["台積電"]);
+});
