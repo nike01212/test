@@ -119,3 +119,9 @@ test("前面確定「台南-KY」，後面的「台南」還是待確認", () =>
   assert.deepEqual(okCodes(r), ["5906"]);
   assert.deepEqual(pendings(r)[0].candidates.sort(), ["1473", "5906"]);
 });
+
+test("新聞內文常見的「單日成交量」不是日成-KY", () => {
+  const r = matcher.analyze("終場仍大漲 7.88%，單日成交量一舉爆出 5.6 萬張巨量；營收單日成長兩成。");
+  assert.deepEqual(okCodes(r), []);
+  assert.deepEqual(okCodes(matcher.analyze("日成-KY(4807)營收創高")), ["4807"]);
+});

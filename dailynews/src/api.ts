@@ -1,5 +1,7 @@
 // 清單相關的 API。全部都在登入檢查之後才會進來。
 import holidays from "../public/data/holidays.json";
+import { cleanUrl } from "../public/links.js";
+import { handleFetch } from "./fetchPage";
 import { json, readJson } from "./http";
 import { findStock } from "./stocks";
 import { assignTradingDay, isIsoDate, parseTaipeiLocal, type Calendar } from "./tradingDay";
@@ -10,6 +12,7 @@ const calendar: Calendar = holidays;
 const MAX_SENTENCES = 2;
 const MAX_SENTENCE_LENGTH = 300;
 const MAX_TITLE_LENGTH = 120;
+const MAX_URL_LENGTH = 1000;
 const MAX_MENTIONS_PER_ARTICLE = 200;
 const MAX_CANDIDATES = 10;
 const MAX_IDS = 50;
@@ -65,6 +68,11 @@ function badRequest(message: string): Response {
   return json({ error: message }, 400);
 }
 
+// 同一天已經有同一篇（articles 的 trading_day + url 唯一索引擋下來的）
+function isDuplicateUrl(err: unknown): boolean {
+  return /UNIQUE constraint failed/i.test(String((err as Error)?.message ?? err));
+}
+
 // GET /api/trading-day?at=2026-10-23T08:30（台北時間；不帶 at 就是現在）
 function handleTradingDay(url: URL): Response {
   const at = url.searchParams.get("at");
@@ -108,7 +116,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   });
 }
 
-// POST /api/articles：瀏覽器比對完的結果。內容只有標題和擷取句，沒有全文
+// POST /api/articles：瀏覽器比對完的結果。內容只有標題、網址和擷取句，沒有全文
 async function handleCreateArticle(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (!body) return badRequest("格式錯誤");
@@ -120,6 +128,11 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
     tradingDay = body.tradingDay;
   }
   const title = cleanText(body.title, MAX_TITLE_LENGTH) || "（沒有標題）";
+  let url: string | null = null;
+  if (body.url !== undefined && body.url !== null) {
+    url = typeof body.url === "string" ? cleanUrl(body.url) : null;
+    if (!url || url.length > MAX_URL_LENGTH) return badRequest("網址格式不對");
+  }
   if (!Array.isArray(body.mentions) || body.mentions.length === 0) return badRequest("這則沒有找到個股");
   if (body.mentions.length > MAX_MENTIONS_PER_ARTICLE) return badRequest("一則提到的個股太多了，請分開貼");
 
@@ -147,9 +160,10 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   // 同一個 batch 是一筆交易，中間不會有別人插進來，所以可以用 MAX(id) 拿到剛新增的那一則
   const articleId = "(SELECT MAX(id) FROM articles)";
   const statements = [
-    env.DB.prepare("INSERT INTO articles (trading_day, title, pasted_at) VALUES (?, ?, ?) RETURNING id").bind(
+    env.DB.prepare("INSERT INTO articles (trading_day, title, url, pasted_at) VALUES (?, ?, ?, ?) RETURNING id").bind(
       tradingDay,
       title,
+      url,
       created,
     ),
   ];
@@ -168,7 +182,14 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
       ).bind(tradingDay, p.raw, p.reason, JSON.stringify(p.candidates), JSON.stringify(p.sentences), created),
     );
   }
-  const results = await env.DB.batch(statements);
+  let results: D1Result[];
+  try {
+    results = await env.DB.batch(statements);
+  } catch (err) {
+    // 整個 batch 是一筆交易，擋下來時個股也不會寫進去
+    if (isDuplicateUrl(err)) return json({ error: "這篇已經在這天的清單裡了", duplicate: true, tradingDay }, 409);
+    throw err;
+  }
   const id = (results[0].results[0] as { id: number }).id;
   return json({ id, tradingDay, confirmed: confirmed.size, pending: pending.length }, 201);
 }
@@ -177,10 +198,16 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
 async function handleMoveArticle(request: Request, env: Env, id: number): Promise<Response> {
   const body = await readJson(request);
   if (!body || !isIsoDate(body.tradingDay)) return badRequest("日期格式要像 2026-10-23");
-  const [moved] = await env.DB.batch([
-    env.DB.prepare("UPDATE articles SET trading_day = ? WHERE id = ?").bind(body.tradingDay, id),
-    env.DB.prepare("UPDATE mentions SET trading_day = ? WHERE article_id = ?").bind(body.tradingDay, id),
-  ]);
+  let moved: D1Result;
+  try {
+    [moved] = await env.DB.batch([
+      env.DB.prepare("UPDATE articles SET trading_day = ? WHERE id = ?").bind(body.tradingDay, id),
+      env.DB.prepare("UPDATE mentions SET trading_day = ? WHERE article_id = ?").bind(body.tradingDay, id),
+    ]);
+  } catch (err) {
+    if (isDuplicateUrl(err)) return json({ error: "那天已經有同一篇了", duplicate: true }, 409);
+    throw err;
+  }
   if (!moved.meta.changes) return json({ error: "找不到這一則" }, 404);
   return json({ ok: true, tradingDay: body.tradingDay });
 }
@@ -257,6 +284,7 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   if (path === "/api/trading-day" && method === "GET") return handleTradingDay(url);
   if (path === "/api/list" && method === "GET") return handleList(url, env);
   if (path === "/api/articles" && method === "POST") return handleCreateArticle(request, env);
+  if (path === "/api/fetch" && method === "POST") return handleFetch(request, env);
   if (path === "/api/stocks" && method === "POST") return handleAddStock(request, env);
   if (path === "/api/stocks" && method === "DELETE") return handleDeleteStock(url, env);
   if (path === "/api/pending/resolve" && method === "POST") return handleResolve(request, env);

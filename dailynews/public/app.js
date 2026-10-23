@@ -1,6 +1,9 @@
-import { buildMatcher } from "/matcher.js";
+import { buildMatcher, makeTitle } from "/matcher.js";
 import { codesText, csvText, GROUP_SIZE, splitGroups } from "/export.js";
+import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
 import { isPersistent, loadCodes, pruneOld, saveCodes } from "/marks.js";
+import { recognize } from "/ocr.js";
+import { extractUrl, splitPaste } from "/split.js";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -21,6 +24,9 @@ const state = {
 
 // 逐檔快速加入：目前在看哪一組、第幾檔（index 等於檔數代表看完了）
 const quick = { label: "", stocks: [], index: 0 };
+
+// 拆分預覽：送出前的每一則。只在這個分頁的記憶體裡，圖片也只在這裡，重新整理就不見
+const preview = { items: [], nextId: 1, submitting: false, fetchToken: 0 };
 
 const $ = (id) => document.getElementById(id);
 
@@ -89,8 +95,23 @@ async function api(path, { method = "GET", body } = {}) {
     throw new Error("請重新登入");
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "發生錯誤，請再試一次。");
+  if (!res.ok) {
+    const err = new Error(data.error || "發生錯誤，請再試一次。");
+    err.data = data;
+    throw err;
+  }
   return data;
+}
+
+function setResult(box, message, kind) {
+  box.textContent = message;
+  box.className = `result${kind ? ` ${kind}` : ""}`;
+}
+
+function articleLink(article) {
+  return article.url
+    ? h("a", { href: article.url, target: "_blank", rel: "noopener noreferrer" }, article.title)
+    : article.title;
 }
 
 let toastTimer;
@@ -272,7 +293,7 @@ function renderSource(src, code, extra) {
     h(
       "p",
       { class: "source-title" },
-      src.article ? src.article.title : "（這則已刪除）",
+      src.article ? articleLink(src.article) : "（這則已刪除）",
       src.article ? h("span", { class: "muted" }, ` · ${taipeiTime(src.article.pasted_at)}`) : null,
     ),
     src.sentences.map((t) => h("blockquote", {}, highlight(t, code, extra))),
@@ -539,7 +560,7 @@ function renderArticle(a) {
   return h(
     "li",
     { class: "article" },
-    h("p", { class: "article-title" }, h("span", { class: "muted" }, `${taipeiTime(a.pasted_at)} `), a.title),
+    h("p", { class: "article-title" }, h("span", { class: "muted" }, `${taipeiTime(a.pasted_at)} `), articleLink(a)),
     h(
       "div",
       { class: "article-meta" },
@@ -577,55 +598,566 @@ async function run(action) {
   }
 }
 
-async function submitPaste() {
-  const text = $("paste-text").value;
-  const result = $("paste-result");
-  result.className = "result";
-  if (!text.trim()) {
-    result.textContent = "請先貼上內容。";
-    result.className = "result bad";
-    return;
-  }
-  if (!state.matcher) {
-    result.textContent = "代號清單還在載入，請稍等一下再按。";
-    result.className = "result bad";
-    return;
-  }
-  const analyzed = state.matcher.analyze(text);
-  if (analyzed.mentions.length === 0) {
-    result.textContent = "沒有找到個股。如果有漏掉的，可以用下面的「手動新增個股」補上。";
-    result.className = "result bad";
-    return;
-  }
-  const button = $("paste-submit");
-  button.disabled = true;
+// ---- 拆分預覽 ----
+
+const BODY_PREVIEW = 1500; // 「看抓到的內容」最多顯示幾個字
+const TITLE_NOTE = 80; // 文字改成網址時，剩下的字在這個長度以內、只有一行，才當成分享文字
+const MENTION_FIELDS = ["status", "code", "raw", "reason", "candidates", "sentences"];
+
+function newItem(fields) {
+  return {
+    id: preview.nextId++,
+    type: "text", // url 網址、text 文字、image 圖片
+    url: null, // 清掉追蹤參數的網址（抓完之後換成轉址後的網址）
+    rawUrl: null, // 貼進來的原始網址
+    note: "", // 網址旁邊的分享文字
+    text: "", // 文字內容；網址類型是自己補貼的內文；圖片是辨識出來的文字
+    fetch: { status: "idle" }, // idle / loading / ok / partial / failed
+    ocr: null, // { status: loading / done / failed }
+    images: [], // 圖片的暫時網址（只在這個分頁）
+    error: "",
+    ...fields,
+  };
+}
+
+function joinText(...parts) {
+  return parts
+    .map((p) => p?.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function hostOf(url) {
   try {
-    const res = await api("/api/articles", {
-      method: "POST",
-      body: {
-        title: analyzed.title,
-        tradingDay: state.pasteDay,
-        mentions: analyzed.mentions.map(({ status, code, raw, reason, candidates, sentences }) => ({
-          status,
-          code,
-          raw,
-          reason,
-          candidates,
-          sentences,
-        })),
-      },
-    });
-    $("paste-text").value = "";
-    setPasteDay(null);
-    result.textContent = `找到 ${res.confirmed} 檔${res.pending ? `、${res.pending} 個待確認` : ""}，已加入 ${formatDate(res.tradingDay)}的清單。`;
-    result.className = "result ok";
-    await loadList(res.tradingDay);
-  } catch (err) {
-    result.textContent = err.message;
-    result.className = "result bad";
-  } finally {
-    button.disabled = false;
+    return new URL(url).hostname;
+  } catch {
+    return url;
   }
+}
+
+// 這次送出會歸到哪一天（抓網址時用來檢查是不是已經貼過）
+function targetDay() {
+  return state.pasteDay ?? state.data?.today.tradingDay ?? null;
+}
+
+// 拿來比對個股的內容：網址是抓到的標題和內文，加上自己補貼的
+function itemContent(item) {
+  if (item.type !== "url") return item.text;
+  const f = item.fetch;
+  const fetched = f.status === "ok" || f.status === "partial" ? [f.title, f.body] : [];
+  return [...fetched, item.text].filter((t) => t?.trim()).join("\n");
+}
+
+function itemTitle(item) {
+  if (item.type === "url") return item.fetch.title || makeTitle(item.note) || makeTitle(item.text) || hostOf(item.url);
+  if (item.type === "image") return `（圖片）${makeTitle(item.text)}`;
+  return makeTitle(item.text) || "（沒有內容）";
+}
+
+function isBusy(item) {
+  return (item.type === "url" && item.fetch.status === "loading") || item.ocr?.status === "loading";
+}
+
+// 每一則現在能不能送出：ready 可以、busy 處理中、blocked 要補內容、none 沒有個股、skip 重複
+function itemState(item) {
+  if (isBusy(item)) return { kind: "busy", message: "" };
+  if (item.type === "url") {
+    const index = preview.items.indexOf(item);
+    const twin = preview.items.findIndex((o, i) => i < index && o.type === "url" && o.url === item.url);
+    if (twin >= 0) return { kind: "skip", message: `和第 ${twin + 1} 則是同一篇，不會重複送出。` };
+    const f = item.fetch;
+    if (f.existingTitle && f.existingDay === targetDay()) {
+      return { kind: "skip", message: `這篇已經在${shortDate(f.existingDay)}的清單裡了（${f.existingTitle}），不會重複送出。` };
+    }
+    if (f.status === "failed" && !item.text.trim()) return { kind: "blocked", message: "還沒補內文，不會送出。" };
+  }
+  const content = itemContent(item);
+  if (!content.trim()) return { kind: "blocked", message: "沒有內容，不會送出。" };
+  if (!state.matcher) return { kind: "busy", message: "代號清單載入中…" };
+  if (item.cache?.content !== content) item.cache = { content, analysis: state.matcher.analyze(content) };
+  const { analysis } = item.cache;
+  if (analysis.mentions.length === 0) return { kind: "none", message: "沒有找到個股，送出時會略過。" };
+  return { kind: "ready", analysis };
+}
+
+// 不能合併的原因；可以合併回傳 null
+function mergeProblem(prev, item) {
+  if (isBusy(prev) || isBusy(item)) return "等抓取、辨識完成再合併";
+  if (prev.type === "url" && item.type === "url") return "兩個網址不能合併成一則（同一篇會自動略過）";
+  return null;
+}
+
+function renderPreview() {
+  // 重畫之前記住正在打字的框，畫完把游標放回去
+  const active = document.activeElement;
+  const focus = active?.matches?.("#preview-list textarea")
+    ? { id: active.closest("[data-item]").dataset.item, start: active.selectionStart, end: active.selectionEnd, top: active.scrollTop }
+    : null;
+
+  $("preview").hidden = preview.items.length === 0;
+  $("preview-count").textContent = preview.items.length;
+  $("preview-list").replaceChildren(...preview.items.map(renderItem));
+  renderPreviewFooter();
+
+  if (focus) {
+    const box = $("preview-list").querySelector(`[data-item="${focus.id}"] textarea`);
+    if (box) {
+      box.focus({ preventScroll: true });
+      box.setSelectionRange(focus.start, focus.end);
+      box.scrollTop = focus.top;
+    }
+  }
+}
+
+function renderPreviewFooter() {
+  const states = preview.items.map(itemState);
+  const count = (kind) => states.filter((s) => s.kind === kind).length;
+  const ready = count("ready");
+  const busy = count("busy");
+  const parts = [];
+  if (busy) parts.push(`${busy} 則還在處理`);
+  if (count("blocked")) parts.push(`${count("blocked")} 則要補內容`);
+  if (count("none")) parts.push(`${count("none")} 則沒有個股`);
+  if (count("skip")) parts.push(`${count("skip")} 則重複`);
+  $("preview-summary").textContent = parts.join("・");
+  // 只剩重複、沒有個股的，按下去就是把它們清掉
+  const droppable = count("skip") + count("none");
+  const button = $("preview-submit");
+  button.textContent = preview.submitting
+    ? "送出中…"
+    : busy
+      ? "處理完才能送出"
+      : ready
+        ? `送出 ${ready} 則`
+        : `略過 ${droppable} 則`;
+  button.disabled = preview.submitting || busy > 0 || ready + droppable === 0;
+}
+
+function typeControl(item, index) {
+  if (item.type === "image") return h("span", { class: "type-badge" }, "圖片");
+  const select = h(
+    "select",
+    { class: "type-select", "aria-label": `第 ${index + 1} 則的類型`, onchange: (e) => changeType(item, e.target.value) },
+    h("option", { value: "url", disabled: item.type !== "url" && !extractUrl(item.text) }, "網址"),
+    h("option", { value: "text" }, "文字"),
+  );
+  select.value = item.type;
+  return select;
+}
+
+function textBox(item, index, placeholder) {
+  const lines = item.text.split("\n").length;
+  return h(
+    "textarea",
+    {
+      class: "item-text",
+      rows: Math.min(10, Math.max(3, lines + 1)),
+      placeholder,
+      disabled: item.ocr?.status === "loading",
+      "aria-label": `第 ${index + 1} 則的內容`,
+      oninput: (e) => {
+        item.text = e.target.value;
+        scheduleItemInfo(item);
+      },
+    },
+    item.text,
+  );
+}
+
+function urlBody(item, index) {
+  const f = item.fetch;
+  const showBox = f.status === "failed" || f.status === "partial" || item.text || item.manual;
+  const status = {
+    loading: h("p", { class: "item-status muted" }, "抓取內文中…"),
+    ok: h("p", { class: "item-status ok" }, `✓ 已抓到內文（${(f.body ?? "").length.toLocaleString()} 字）`),
+    partial: h("p", { class: "item-status warn" }, "⚠ 只抓到標題和摘要，可能漏掉個股。可以打開網址，把內文貼在下面。"),
+    failed: h(
+      "p",
+      { class: "item-status bad" },
+      `✗ 抓取失敗：${f.error}。請打開網址，把內文複製貼在下面。`,
+      h("button", { type: "button", class: "link-button small", onclick: () => fetchArticle(item) }, "重新抓取"),
+    ),
+  }[f.status];
+  return [
+    h(
+      "p",
+      { class: "item-url" },
+      h("a", { href: item.url, target: "_blank", rel: "noopener noreferrer" }, item.url),
+      item.rawUrl && item.rawUrl !== item.url ? h("span", { class: "muted" }, " （已清掉追蹤參數）") : null,
+    ),
+    item.note ? h("p", { class: "item-note muted" }, item.note) : null,
+    status,
+    f.status === "ok"
+      ? h(
+          "details",
+          { class: "fetched", open: item.bodyOpen, ontoggle: (e) => (item.bodyOpen = e.target.open) },
+          h("summary", {}, "看抓到的內容"),
+          h("p", { class: "fetched-title" }, f.title),
+          h("p", { class: "fetched-body" }, f.body.length > BODY_PREVIEW ? `${f.body.slice(0, BODY_PREVIEW)}…` : f.body),
+        )
+      : null,
+    f.status === "ok" && !showBox
+      ? h(
+          "button",
+          {
+            type: "button",
+            class: "link-button small",
+            onclick: () => {
+              item.manual = true;
+              renderPreview();
+            },
+          },
+          "自己補貼內文",
+        )
+      : null,
+    showBox ? textBox(item, index, "把內文貼在這裡（只會存標題、網址和提到個股的句子）") : null,
+  ];
+}
+
+function ocrStepText(o) {
+  const pct = o.progress ? ` ${Math.round(o.progress * 100)}%` : "";
+  const first = /下載/.test(o.step) ? "（第一次使用要下載約 6 MB，之後就不用）" : "";
+  return `${o.step}${pct}${first}`;
+}
+
+function imageBody(item) {
+  const o = item.ocr;
+  return [
+    h(
+      "div",
+      { class: "thumbs" },
+      item.images.map((src) =>
+        h("img", { src, alt: "貼上的圖片（點一下放大）", class: "thumb", onclick: (e) => e.target.classList.toggle("zoomed") }),
+      ),
+    ),
+    o?.status === "loading"
+      ? h(
+          "div",
+          { class: "ocr-progress" },
+          h("p", { class: "muted ocr-step" }, ocrStepText(o)),
+          h("div", { class: "bar" }, h("div", { class: "bar-fill", style: `width: ${Math.round((o.progress ?? 0) * 100)}%` })),
+        )
+      : null,
+    o?.status === "done" ? h("p", { class: "item-status ok" }, "✓ 辨識完成。不準的地方可以直接改下面的文字。") : null,
+    o?.status === "failed" ? h("p", { class: "item-status bad" }, `✗ 辨識失敗：${o.error}。可以自己把文字打在下面。`) : null,
+    h("p", { class: "muted item-note" }, "圖片只在這台裝置上辨識，不會上傳；送出或刪除這則之後就丟掉。"),
+  ];
+}
+
+function foundLine(item, st) {
+  if (st.kind === "busy") return h("p", { class: "found muted" }, st.message);
+  if (st.kind !== "ready") {
+    const kind = { none: "warn", skip: "muted", blocked: "bad" }[st.kind];
+    return h("p", { class: `found ${kind}` }, st.message);
+  }
+  const ok = st.analysis.mentions.filter((m) => m.status === "ok");
+  const pending = st.analysis.mentions.filter((m) => m.status === "pending");
+  return h(
+    "p",
+    { class: "found" },
+    h("span", { class: "muted" }, `找到 ${ok.length} 檔${pending.length ? `、${pending.length} 個待確認` : ""}：`),
+    ok.map((m) => h("span", { class: "chip" }, stockLabel(m.code))),
+    pending.map((m) => h("span", { class: "chip pending-chip", title: m.reason }, `待確認：${m.raw}`)),
+  );
+}
+
+function renderItem(item, index) {
+  const st = itemState(item);
+  const prev = preview.items[index - 1];
+  const problem = prev ? mergeProblem(prev, item) : null;
+  return h(
+    "li",
+    { class: `preview-item ${st.kind}`, "data-item": item.id },
+    h(
+      "div",
+      { class: "item-head" },
+      h("span", { class: "item-num" }, `${index + 1}`),
+      typeControl(item, index),
+      h("strong", { class: "item-title" }, itemTitle(item)),
+      h(
+        "span",
+        { class: "item-actions" },
+        prev
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: "link-button small",
+                disabled: !!problem,
+                title: problem ?? "和上一則合併成一則",
+                onclick: () => mergeUp(index),
+              },
+              "合併到上一則",
+            )
+          : null,
+        h("button", { type: "button", class: "link-button small danger", onclick: () => removeItem(item) }, "刪除"),
+      ),
+    ),
+    item.type === "url" ? urlBody(item, index) : null,
+    item.images.length ? imageBody(item) : null,
+    item.type !== "url" ? textBox(item, index, item.type === "image" ? "辨識出來的文字" : "這則的內容") : null,
+    foundLine(item, st),
+    item.error ? h("p", { class: "bad item-error" }, item.error) : null,
+  );
+}
+
+// 打字時不重畫整則（游標會跳掉），只更新標題、找到的個股和送出按鈕
+const infoTimers = new Map();
+function scheduleItemInfo(item) {
+  clearTimeout(infoTimers.get(item.id));
+  infoTimers.set(
+    item.id,
+    setTimeout(() => {
+      const card = $("preview-list").querySelector(`[data-item="${item.id}"]`);
+      if (!card) return;
+      const st = itemState(item);
+      card.className = `preview-item ${st.kind}`;
+      card.querySelector(".item-title").textContent = itemTitle(item);
+      card.querySelector(".found").replaceWith(foundLine(item, st));
+      const urlOption = card.querySelector('.type-select option[value="url"]');
+      if (urlOption && item.type !== "url") urlOption.disabled = !extractUrl(item.text);
+      renderPreviewFooter();
+    }, 300),
+  );
+}
+
+function updateOcrProgress(item) {
+  const card = $("preview-list").querySelector(`[data-item="${item.id}"]`);
+  const step = card?.querySelector(".ocr-step");
+  if (!step) return;
+  step.textContent = ocrStepText(item.ocr);
+  card.querySelector(".bar-fill").style.width = `${Math.round((item.ocr.progress ?? 0) * 100)}%`;
+}
+
+function dropItem(item) {
+  for (const src of item.images) URL.revokeObjectURL(src);
+  preview.items = preview.items.filter((o) => o !== item);
+}
+
+function removeItem(item) {
+  dropItem(item);
+  renderPreview();
+}
+
+function clearPreview() {
+  if (!confirm(`清掉預覽裡的 ${preview.items.length} 則？還沒送出的內容都會不見。`)) return;
+  for (const item of [...preview.items]) dropItem(item);
+  setResult($("preview-result"), "");
+  renderPreview();
+}
+
+function mergeUp(index) {
+  const prev = preview.items[index - 1];
+  const item = preview.items[index];
+  if (!prev || !item || mergeProblem(prev, item)) return;
+  // 有網址的那則當主體，另一則的文字變成補貼的內文
+  const base = prev.type === "url" ? prev : item.type === "url" ? item : prev;
+  const merged = {
+    ...base,
+    id: prev.id,
+    text: joinText(prev.text, item.text),
+    images: [...prev.images, ...item.images],
+    ocr: prev.ocr ?? item.ocr,
+    error: "",
+    cache: null,
+  };
+  preview.items.splice(index - 1, 2, merged);
+  renderPreview();
+}
+
+function changeType(item, type) {
+  if (type === item.type) return;
+  if (type === "text") {
+    // 網址改成文字：不抓了，分享文字和網址都變成這則的內容
+    item.text = joinText(item.note, item.url, item.text);
+    Object.assign(item, { type: "text", note: "", fetch: { status: "idle" } });
+  } else {
+    const found = extractUrl(item.text);
+    if (!found) {
+      toast("這則文字裡沒有網址", "bad");
+      renderPreview();
+      return;
+    }
+    // 剩下的字只有一行短短的（像是標題）就當分享文字；比較長的當補貼的內文，一樣拿去比對個股
+    const rest = found.rest.replace(/\n{3,}/g, "\n\n");
+    const isNote = !rest.includes("\n") && rest.length <= TITLE_NOTE;
+    Object.assign(item, { type: "url", url: found.url, rawUrl: found.rawUrl, note: isNote ? rest : "", text: isNote ? "" : rest });
+    fetchArticle(item);
+  }
+  item.cache = null;
+  renderPreview();
+}
+
+// 請伺服器把網頁轉過來，在瀏覽器裡取出標題和內文
+async function fetchArticle(item) {
+  const token = ++preview.fetchToken;
+  item.fetchToken = token;
+  item.fetch = { status: "loading" };
+  renderPreview();
+  const day = targetDay();
+  let result;
+  try {
+    const res = await fetch("/api/fetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: item.url, day }),
+    });
+    if (res.status === 401) {
+      location.replace("/login");
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `伺服器回應錯誤（${res.status}）`);
+    }
+    const finalUrl = res.headers.get("X-Final-Url") || item.url;
+    const page = extractArticle(decodeHtml(await res.arrayBuffer(), res.headers.get("X-Charset")), finalUrl);
+    if (page.body.length >= MIN_BODY) result = { status: "ok", title: page.title, body: page.body };
+    else if (page.title || page.description) result = { status: "partial", title: page.title, body: page.description };
+    else result = { status: "failed", error: "抓到網頁，但找不到內文（可能要登入、付費，或內容是另外載入的）" };
+    const existing = res.headers.get("X-Duplicate-Title");
+    if (existing) Object.assign(result, { existingTitle: decodeURIComponent(existing), existingDay: day });
+    result.finalUrl = finalUrl;
+  } catch (err) {
+    result = { status: "failed", error: err.message === "Failed to fetch" ? "連不到伺服器" : err.message };
+  }
+  // 等的時候這則被刪掉、改成文字或重新抓了，就不用了
+  if (item.fetchToken !== token || item.type !== "url" || !preview.items.includes(item)) return;
+  if (result.finalUrl) item.url = result.finalUrl; // 短網址轉址之後的真正網址，去重才準
+  item.fetch = result;
+  renderPreview();
+}
+
+async function runOcr(item, file) {
+  try {
+    const text = await recognize(file, (p) => {
+      item.ocr = { status: "loading", ...p };
+      updateOcrProgress(item);
+    });
+    item.text = joinText(item.text, text);
+    item.ocr = { status: "done" };
+  } catch (err) {
+    console.error("ocr", err);
+    item.ocr = { status: "failed", error: err?.message || "不明原因" };
+  }
+  item.cache = null;
+  if (preview.items.includes(item)) renderPreview();
+}
+
+function addImages(fileList) {
+  const files = [...fileList].filter((f) => f.type.startsWith("image/"));
+  if (files.length === 0) return false;
+  for (const file of files) {
+    const item = newItem({
+      type: "image",
+      images: [URL.createObjectURL(file)],
+      ocr: { status: "loading", step: "排隊中", progress: 0 },
+    });
+    preview.items.push(item);
+    runOcr(item, file);
+  }
+  setResult($("paste-result"), `加入 ${files.length} 張圖片，正在辨識文字。`, "ok");
+  setResult($("preview-result"), "");
+  renderPreview();
+  return true;
+}
+
+// 按「拆分預覽」：把框裡的內容拆成一則一則，加到預覽
+function addPaste() {
+  const box = $("paste-text");
+  const result = $("paste-result");
+  if (!box.value.trim()) {
+    setResult(result, "請先貼上內容。圖片可以直接貼上、拖曳進來，或按「加入圖片」。", "bad");
+    return;
+  }
+  const { items, promo, duplicates } = splitPaste(box.value);
+  let skipped = duplicates;
+  const added = [];
+  for (const fields of items) {
+    if (fields.type === "url" && preview.items.some((o) => o.type === "url" && o.url === fields.url)) {
+      skipped++;
+      continue;
+    }
+    const item = newItem(fields);
+    preview.items.push(item);
+    added.push(item);
+  }
+  box.value = "";
+  const urls = added.filter((i) => i.type === "url").length;
+  const notes = [
+    added.length ? `拆成 ${added.length} 則（網址 ${urls}、文字 ${added.length - urls}）` : "沒有拆出新的內容",
+  ];
+  if (promo) notes.push(`拿掉 ${promo} 個 App 推廣文字或連結`);
+  if (skipped) notes.push(`略過 ${skipped} 個重複的網址`);
+  setResult(result, `${notes.join("，")}。${added.length ? "請確認下面的預覽再送出。" : ""}`, added.length ? "ok" : "bad");
+  setResult($("preview-result"), "");
+  renderPreview();
+  for (const item of added) if (item.type === "url") fetchArticle(item);
+  if (added.length) {
+    $("preview-list").querySelector(`[data-item="${added[0].id}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+async function submitPreview() {
+  preview.submitting = true;
+  renderPreviewFooter();
+  const tally = { sent: 0, pending: 0, dup: 0, none: 0, failed: 0 };
+  let day = null;
+  for (const item of [...preview.items]) {
+    const st = itemState(item);
+    if (st.kind === "skip" || st.kind === "none") {
+      dropItem(item);
+      tally[st.kind === "skip" ? "dup" : "none"]++;
+      continue;
+    }
+    if (st.kind !== "ready") continue;
+    try {
+      const res = await api("/api/articles", {
+        method: "POST",
+        body: {
+          title: itemTitle(item),
+          url: item.type === "url" ? item.url : null,
+          tradingDay: state.pasteDay,
+          mentions: st.analysis.mentions.map((m) => Object.fromEntries(MENTION_FIELDS.map((k) => [k, m[k]]))),
+        },
+      });
+      tally.sent++;
+      tally.pending += res.pending;
+      day = res.tradingDay;
+      dropItem(item);
+    } catch (err) {
+      if (err.data?.duplicate) {
+        tally.dup++;
+        day ??= err.data.tradingDay;
+        dropItem(item);
+      } else {
+        item.error = `送出失敗：${err.message}`;
+        tally.failed++;
+      }
+    }
+  }
+  preview.submitting = false;
+  if (preview.items.length === 0) setPasteDay(null);
+  if (day) await loadList(day).catch((err) => toast(err.message, "bad"));
+
+  const parts = [];
+  if (tally.sent) {
+    parts.push(
+      `已送出 ${tally.sent} 則到 ${formatDate(day)}的清單，清單現在 ${state.stocks.length} 檔${tally.pending ? `（另有 ${tally.pending} 個待確認）` : ""}`,
+    );
+  }
+  if (tally.dup) parts.push(`${tally.dup} 則已經貼過，沒有重複送出`);
+  if (tally.none) parts.push(`${tally.none} 則沒有找到個股，沒有送出`);
+  if (preview.items.length) {
+    parts.push(`還有 ${preview.items.length} 則留在預覽裡${tally.failed ? `（${tally.failed} 則送出失敗）` : ""}`);
+  }
+  // 預覽清空時整區會藏起來，結果改顯示在貼上的地方
+  const message = `${parts.join("；")}。`;
+  const kind = tally.failed ? "bad" : "ok";
+  setResult($("preview-result"), preview.items.length ? message : "", kind);
+  setResult($("paste-result"), preview.items.length ? "" : message, kind);
+  renderPreview();
+  if (preview.items.length === 0) $("paste-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function setPasteDay(day) {
@@ -725,6 +1257,7 @@ async function loadMatcher() {
   state.dataInfo = ` · 代號清單 ${state.matcher.size.toLocaleString()} 檔（${stocks.updated} 更新）`;
   renderDataInfo();
   if (state.data) render(); // 補上待確認候選的名稱、句子裡的標示
+  renderPreview();
 }
 
 // ---- 事件 ----
@@ -733,7 +1266,53 @@ $("logout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
   location.replace("/login");
 });
-$("paste-submit").addEventListener("click", submitPaste);
+$("paste-submit").addEventListener("click", addPaste);
+$("paste-text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) addPaste();
+});
+$("paste-images").addEventListener("change", (e) => {
+  addImages(e.target.files);
+  e.target.value = "";
+});
+$("preview-submit").addEventListener("click", submitPreview);
+$("preview-clear").addEventListener("click", clearPreview);
+
+// 圖片：貼上（任何地方）或拖曳進來
+document.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files ?? [])];
+  if (!files.some((f) => f.type.startsWith("image/"))) return;
+  addImages(files);
+  // 同時有文字（例如從網頁複製）就讓文字照常貼上
+  if (!e.clipboardData.getData("text/plain")) e.preventDefault();
+});
+const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+let dragDepth = 0;
+document.addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth++;
+  $("paste-card").classList.add("dragging");
+});
+document.addEventListener("dragleave", (e) => {
+  if (hasFiles(e) && --dragDepth <= 0) {
+    dragDepth = 0;
+    $("paste-card").classList.remove("dragging");
+  }
+});
+// 擋掉瀏覽器預設「拖進來就打開圖片」，不然預覽會不見
+document.addEventListener("dragover", (e) => {
+  if (hasFiles(e)) e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $("paste-card").classList.remove("dragging");
+  if (!addImages(e.dataTransfer.files)) setResult($("paste-result"), "只能拖圖片進來；網址和文字請直接貼上。", "bad");
+});
+// 預覽裡還有沒送出的，關掉或重新整理前先提醒
+window.addEventListener("beforeunload", (e) => {
+  if (preview.items.length) e.preventDefault();
+});
 $("paste-day-change").addEventListener("click", () => {
   if (state.pasteDay) return setPasteDay(null);
   const input = $("paste-day-input");

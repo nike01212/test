@@ -32,18 +32,38 @@
         <button class="link-button" id="go-today" type="button">回到今日清單</button>
       </p>
 
-      <section class="card paste">
-        <h2>貼上新聞或 memo</h2>
-        <label class="visually-hidden" for="paste-text">新聞或 memo 內容</label>
-        <textarea id="paste-text" rows="6" placeholder="一次貼一則（例如一篇新聞或一份券商 memo），第一行會當成標題。按「整理」後找出提到的個股，只會存標題和提到個股的句子。"></textarea>
+      <section class="card paste" id="paste-card">
+        <h2>貼上新聞、memo 或圖片</h2>
+        <label class="visually-hidden" for="paste-text">新聞網址或 memo 內容</label>
+        <textarea id="paste-text" rows="6" placeholder="網址和文字可以混在一起貼，一次很多則也可以。圖片可以直接貼上、拖曳進來，或按「加入圖片」。按「拆分預覽」後，先確認拆好的每一則再送出；只會存標題、網址和提到個股的句子。"></textarea>
         <div class="paste-meta">
           <span>會歸到 <strong id="paste-day">—</strong></span>
           <button class="link-button small" id="paste-day-change" type="button">改日期</button>
-          <input type="date" id="paste-day-input" aria-label="這則要歸到哪一天" hidden />
+          <input type="date" id="paste-day-input" aria-label="這次貼的要歸到哪一天" hidden />
           <span class="muted" id="paste-day-note"></span>
         </div>
-        <button class="primary" id="paste-submit" type="button">整理</button>
+        <div class="paste-actions">
+          <button class="primary" id="paste-submit" type="button">拆分預覽</button>
+          <label class="secondary file-button">
+            加入圖片
+            <input type="file" id="paste-images" accept="image/*" multiple />
+          </label>
+        </div>
         <p class="result" id="paste-result" role="status"></p>
+      </section>
+
+      <section class="card preview" id="preview" hidden>
+        <div class="preview-head">
+          <h2>拆分預覽（<span id="preview-count">0</span> 則）</h2>
+          <button class="link-button small danger" id="preview-clear" type="button">全部清掉</button>
+        </div>
+        <p class="muted preview-help">確認每一則的類型和內容，拆錯可以合併或刪除。網址會自動抓內文，抓不到就把內文貼進那一則。</p>
+        <ol class="preview-list" id="preview-list"></ol>
+        <div class="preview-foot">
+          <button class="primary" id="preview-submit" type="button">送出</button>
+          <span class="muted" id="preview-summary"></span>
+        </div>
+        <p class="result" id="preview-result" role="status"></p>
       </section>
 
       <section class="pending" id="pending" hidden>

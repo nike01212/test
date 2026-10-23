@@ -5,6 +5,7 @@
     "module": "es2022",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    "allowJs": true,
     "types": ["./worker-configuration.d.ts"],
     "strict": true,
     "noEmit": true,
