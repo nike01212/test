@@ -12,10 +12,14 @@ import {
   tooManyFailures,
 } from "./auth";
 import { handleApi, pruneOldBodies } from "./api";
+import { scheduledClosing } from "./closing";
 import { json } from "./http";
 
 // 沒登入也能拿到的東西：登入頁本身和它需要的檔案
 const PUBLIC_PATHS = new Set(["/login", "/login.js", "/style.css", "/favicon.svg", "/robots.txt", "/api/login"]);
+
+// 要和 wrangler.jsonc 的 triggers 寫得一模一樣
+const CLOSING_CRON = "30 6,8,10,12,14,23 * * *";
 
 // 不擋爬取，搜尋引擎才看得到每個回應上的 noindex；真正不收錄靠的是 X-Robots-Tag
 const ROBOTS_TXT = "User-agent: *\nDisallow:\n";
@@ -100,8 +104,14 @@ export default {
   async fetch(request, env): Promise<Response> {
     return withSiteHeaders(await route(request, env));
   },
-  // wrangler.jsonc 的 triggers：每天台北時間 03:00 清掉太舊的圖片全文
-  async scheduled(_controller, env, ctx): Promise<void> {
+  // wrangler.jsonc 的 triggers 有兩個排程，依 cron 分開處理（時間都是 UTC）
+  async scheduled(controller, env, ctx): Promise<void> {
+    if (controller.cron === CLOSING_CRON) {
+      // 台北 14:30、16:30、18:30、20:30、22:30、隔天 07:30：比對新貼的個股在前一個交易日收盤有沒有漲停（比對過的不再抓）
+      ctx.waitUntil(scheduledClosing(env, controller.scheduledTime).then(console.log));
+      return;
+    }
+    // 每天台北時間 03:00 清掉太舊的圖片全文
     ctx.waitUntil(
       pruneOldBodies(env).then(({ before, cleared }) => console.log(`圖片全文：清掉 ${before} 以前的 ${cleared} 則`)),
     );

@@ -24,7 +24,9 @@
     --text: #e8eaed;
     --muted: #9aa1ab;
     --border: #33373d;
-    --accent: #e5484d;
+    /* 深色底配紅色按鈕太刺眼（10/23 發起人要求），按鈕、勾選改成金色，上面的字改深色 */
+    --accent: #e6c261;
+    --accent-text: #1c1f24;
     --error: #ff8a80;
     --ok: #5bd17a;
     --warn: #e3b341;
@@ -69,6 +71,37 @@ main {
   max-width: 720px;
   margin: 0 auto;
   padding: 24px 16px 48px;
+}
+
+/* 電腦寬度夠的時候改成左右兩欄（10/23 發起人要求）：左邊貼上和預覽、右邊清單。
+   左欄跟著畫面停在上面，預覽很長時在左欄裡面捲動；手機和平板直放還是一欄 */
+@media (min-width: 1100px) {
+  main {
+    max-width: 1320px;
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(380px, 5fr) 7fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  .col-input {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    /* 捲軸不要壓到卡片的邊框 */
+    padding-right: 4px;
+  }
+
+  .col-input > section:last-child,
+  .col-list > :last-child {
+    margin-bottom: 0;
+  }
 }
 
 h1 {
@@ -194,7 +227,9 @@ h2 {
 }
 
 main > section,
-main > details {
+main > details,
+.column > section,
+.column > details {
   margin-bottom: 16px;
 }
 
@@ -867,6 +902,81 @@ mark {
 .tag.added {
   color: var(--ok);
   border-color: var(--ok);
+}
+
+/* 連續被提到 */
+.tag.streak {
+  color: var(--label-text);
+  border-color: var(--label-text);
+  background: var(--label-bg);
+}
+
+/* 續看清單 */
+.watch h2 {
+  margin-bottom: 4px;
+}
+
+.watch-help {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+
+.watch-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 0.9rem;
+}
+
+.watch-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.watch-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.watch-item .code {
+  font-size: 1.1rem;
+}
+
+.watch-item .name {
+  font-weight: 600;
+}
+
+.watch-item button {
+  margin-left: auto;
+}
+
+.watch-group .group-label {
+  color: var(--accent);
+}
+
+/* 延續性觀察自己的匯出（另外存成一組自選） */
+.watch-export {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.watch-export > p {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+
+.watch-export .export-group:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 /* 匯出 */

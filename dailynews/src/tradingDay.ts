@@ -1,7 +1,8 @@
 // 所屬交易日：看「貼進來的時候，下一次開盤是哪一天」。
 // - 交易日 09:00 前貼入 → 當天
 // - 其他時間（09:00 之後、週末、休市日）→ 下一個開盤日
-// 休市日來自證交所公布的行事曆（public/data/holidays.json，由 npm run update-data 產生）。
+// 休市日來自證交所公布的行事曆（public/data/holidays.json，由 npm run update-data 產生），
+// 加上手動補的臨時休市日（public/data/closures.json，例如颱風假），兩個合起來在 src/calendar.ts。
 
 export interface Calendar {
   years: number[]; // 行事曆有涵蓋的年份
@@ -65,6 +66,31 @@ export function closedReason(date: string, cal: Calendar, missing?: Set<number>)
     if (date.endsWith("-01-01")) return "中華民國開國紀念日";
   }
   return null;
+}
+
+// 往前或往後找最近的開盤日（不含 date 本身）。最長的連假也不會超過兩週，設上限避免資料有誤時無窮迴圈
+function stepTradingDay(date: string, cal: Calendar, step: 1 | -1): string {
+  let day = addDays(date, step);
+  for (let i = 0; i < 30 && closedReason(day, cal); i++) day = addDays(day, step);
+  return day;
+}
+
+export function previousTradingDay(date: string, cal: Calendar): string {
+  return stepTradingDay(date, cal, -1);
+}
+
+export function nextTradingDay(date: string, cal: Calendar): string {
+  return stepTradingDay(date, cal, 1);
+}
+
+// 往前 n 個開盤日，由近到遠（不含 date 本身）
+export function previousTradingDays(date: string, cal: Calendar, n: number): string[] {
+  const days: string[] = [];
+  for (let d = date; days.length < n; ) {
+    d = previousTradingDay(d, cal);
+    days.push(d);
+  }
+  return days;
 }
 
 export function assignTradingDay(ms: number, cal: Calendar): Assignment {

@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow, noarchive" />
-    <title>今日清單 · 新聞標的整理</title>
+    <title>今日清單 · 盤後新聞標的整理</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <header class="topbar">
-      <span class="brand">新聞標的整理</span>
+      <span class="brand">盤後新聞標的整理</span>
       <button class="link-button" id="logout" type="button">登出</button>
     </header>
     <main>
@@ -32,10 +32,13 @@
         <button class="link-button" id="go-today" type="button">回到今日清單</button>
       </p>
 
+      <!-- 手機是一欄（照這裡的順序）；電腦寬度夠的時候左邊貼上和預覽、右邊清單（style.css 的 .layout） -->
+      <div class="layout">
+      <div class="column col-input">
       <section class="card paste" id="paste-card">
         <h2>貼上新聞、memo 或圖片</h2>
         <label class="visually-hidden" for="paste-text">新聞網址或 memo 內容</label>
-        <textarea id="paste-text" rows="6" placeholder="網址和文字可以混在一起貼，一次很多則也可以。圖片可以直接貼上、拖曳進來，或按「加入圖片」。按「拆分預覽」後，先確認拆好的每一則再送出；只會存標題、網址、提到個股的句子和標籤。"></textarea>
+        <textarea id="paste-text" rows="6" placeholder="網址和文字可以混在一起貼，一次很多則也可以。圖片可以直接貼上、拖曳進來，或按「加入圖片」。按「預覽」後，先確認拆好的每一則再送出；只會存標題、網址、提到個股的句子和標籤。"></textarea>
         <div class="paste-meta">
           <span>會歸到 <strong id="paste-day">—</strong></span>
           <button class="link-button small" id="paste-day-change" type="button">改日期</button>
@@ -43,7 +46,7 @@
           <span class="muted" id="paste-day-note"></span>
         </div>
         <div class="paste-actions">
-          <button class="primary" id="paste-submit" type="button">拆分預覽</button>
+          <button class="primary" id="paste-submit" type="button">預覽</button>
           <label class="secondary file-button">
             加入圖片
             <input type="file" id="paste-images" accept="image/*" multiple />
@@ -54,7 +57,7 @@
 
       <section class="card preview" id="preview" hidden>
         <div class="preview-head">
-          <h2>拆分預覽（<span id="preview-count">0</span> 則）</h2>
+          <h2>預覽（<span id="preview-count">0</span> 則）</h2>
           <button class="link-button small danger" id="preview-clear" type="button">全部清掉</button>
         </div>
         <p class="muted preview-help">確認每一則的類型和內容，拆錯可以合併或刪除。網址會自動抓內文，抓不到就把內文貼進那一則。</p>
@@ -66,10 +69,25 @@
         <p class="result" id="preview-result" role="status"></p>
       </section>
 
+      </div>
+
+      <div class="column col-list">
       <section class="pending" id="pending" hidden>
         <h2>待確認（<span id="pending-count">0</span>）</h2>
         <p class="muted">這些字可能是個股，也可能不是。選對的代號，或按「不是個股」。</p>
         <div id="pending-list"></div>
+      </section>
+
+      <section class="card watch" id="watch">
+        <h2>延續性觀察（<span id="watch-count">0</span> 檔）</h2>
+        <p class="muted watch-help" id="watch-help"></p>
+        <div class="watch-status" id="watch-status" role="status"></div>
+        <ul class="watch-list" id="watch-list"></ul>
+        <div id="watch-add"></div>
+        <div class="watch-export" id="watch-export" hidden>
+          <p class="muted">另外存成一組自選（大家共用，不看個人的勾選）：</p>
+          <div class="export-groups" id="watch-export-groups"></div>
+        </div>
       </section>
 
       <section class="card export" id="export" hidden>
@@ -92,11 +110,6 @@
       <section class="stocks" id="stock-list" aria-live="polite"></section>
 
       <section class="card">
-        <h2>手動新增個股</h2>
-        <div id="add-stock"></div>
-      </section>
-
-      <section class="card">
         <h2>這天貼入的資料（<span id="article-count">0</span> 則）</h2>
         <ul class="articles" id="article-list"></ul>
       </section>
@@ -110,6 +123,8 @@
       </details>
 
       <p class="status">資料庫：<span id="db">檢查中…</span><span id="data-info"></span></p>
+      </div>
+      </div>
     </main>
     <dialog class="quick" id="quick" aria-labelledby="quick-group">
       <div class="quick-top">

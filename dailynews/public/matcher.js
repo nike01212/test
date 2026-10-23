@@ -322,7 +322,7 @@ export function buildMatcher(stocksData, rules = {}) {
     return { title: makeTitle(text), mentions: [...confirmed.values(), ...pending.values()] };
   }
 
-  // 手動新增、改成其他個股時的搜尋：代號開頭，或名稱、別名包含輸入的字
+  // 待確認改成其他個股、手動加到延續性觀察時的搜尋：代號開頭，或名稱、別名包含輸入的字
   function search(query, limit = 8) {
     const q = normalize(query.trim()).replace(/\s+/g, "");
     if (!q) return [];

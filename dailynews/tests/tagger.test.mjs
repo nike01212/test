@@ -21,10 +21,10 @@ test("「與輝達合作」：合作標籤、合作對象顯示「輝達（NVIDI
   assert.deepEqual(m.partners, ["輝達（NVIDIA）"]);
 });
 
-test("「NVIDIA 訂單」：英文別名不分大小寫、全形半形", () => {
+test("「接獲 NVIDIA 訂單」：英文別名不分大小寫、全形半形", () => {
   for (const text of ["緯創接獲NVIDIA訂單", "緯創接獲 Nvidia 訂單", "緯創接獲ＮＶＩＤＩＡ訂單", "緯創接獲NVDA訂單"]) {
     const [m] = analyze(text);
-    assert.deepEqual(m.tags, ["訂單"], text);
+    assert.deepEqual(m.tags, ["新訂單"], text);
     assert.deepEqual(m.partners, ["輝達（NVIDIA）"], text);
   }
 });
@@ -49,7 +49,8 @@ test("一則提到好幾檔：每檔只看提到它的段落", () => {
 
 test("一則只提到一檔：整則內容都算（後面沒寫名稱的段落也算）", () => {
   const [m] = analyze("國巨(2327)9月營收創新高\n公司表示，AI伺服器訂單強勁，產能滿載，明年擴產。\n主要客戶包括蘋果、特斯拉。");
-  assert.deepEqual(m.tags, ["訂單", "營收創高", "供不應求", "擴產"].sort((a, b) => tagger.tagNames.indexOf(a) - tagger.tagNames.indexOf(b)));
+  // 「訂單強勁」講的是既有訂單，不算新訂單；「公司表示」是 6人說
+  assert.deepEqual(m.tags, ["營收創高", "供不應求", "擴產", "6人說"].sort((a, b) => tagger.tagNames.indexOf(a) - tagger.tagNames.indexOf(b)));
   assert.deepEqual(m.partners, ["蘋果（Apple）", "特斯拉（Tesla）"]);
 });
 
@@ -68,10 +69,27 @@ test("except：含有關鍵字但不是那個意思的詞不算", () => {
   assert.deepEqual(tagger.judge("合作金庫今天公布獲利").tags, []);
   assert.deepEqual(tagger.judge("合作金庫與輝達合作").tags, ["合作"]);
   assert.deepEqual(tagger.judge("現在是最佳切入點").tags, []);
-  assert.deepEqual(tagger.judge("打入蘋果供應鏈").tags, ["訂單"]);
+  assert.deepEqual(tagger.judge("打入蘋果供應鏈").tags, []); // 沒有直接說訂單，不算新訂單；也不是轉型
   assert.deepEqual(tagger.judge("美超微伺服器出貨").partners, ["美超微（Supermicro）"]); // 不是超微（AMD）
   assert.deepEqual(tagger.judge("超微MI450").partners, ["超微（AMD）"]);
   assert.deepEqual(tagger.judge("蘋果日報報導").partners, []);
+});
+
+test("新訂單：只認明確拿到新訂單的說法", () => {
+  for (const text of ["廣達拿下美系雲端大廠AI伺服器訂單", "公司取得新訂單", "客戶追加訂單", "急單湧入", "受惠轉單效應", "AI訂單湧入", "斬獲大單"]) {
+    assert.ok(tagger.judge(text).tags.includes("新訂單"), text);
+  }
+  // 既有訂單、訂單變少、總體經濟的新訂單指數、單季營收都不算
+  for (const text of ["訂單強勁", "訂單能見度看到明年", "在手訂單達500億元", "訂單下滑", "美國ISM製造業新訂單指數下滑", "新訂單減少", "最新單季營收", "尚未取得訂單", "砍單潮"]) {
+    assert.ok(!tagger.judge(text).tags.includes("新訂單"), text);
+  }
+});
+
+test("6人說：公司表示、董事長、總經理、財務長、總裁、執行長", () => {
+  for (const text of ["公司今(23)日表示，明年營運審慎樂觀", "董事長魏哲家指出", "總經理表示", "財務長說明", "執行長受訪", "總裁致詞"]) {
+    assert.deepEqual(tagger.judge(text).tags, ["6人說"], text);
+  }
+  assert.deepEqual(tagger.judge("央行總裁楊金龍表示").tags, []);
 });
 
 test("英文別名要整個字對上", () => {
@@ -92,9 +110,9 @@ test("銀行、券商和台股不當合作對象：大摩、高盛、台積電",
 test("合作對象依市值排名排，標籤依設定檔的順序", () => {
   const r = tagger.union([
     { tags: ["合作"], partners: ["特斯拉（Tesla）"] },
-    { tags: ["訂單", "合作", "已刪掉的標籤"], partners: ["輝達（NVIDIA）"] },
+    { tags: ["新訂單", "合作", "已刪掉的標籤"], partners: ["輝達（NVIDIA）"] },
   ]);
-  assert.deepEqual(r.tags, ["訂單", "合作", "已刪掉的標籤"]);
+  assert.deepEqual(r.tags, ["新訂單", "合作", "已刪掉的標籤"]);
   assert.deepEqual(r.partners, ["輝達（NVIDIA）", "特斯拉（Tesla）"]);
 });
 
@@ -103,8 +121,8 @@ test("設定檔加新標籤，含關鍵字的內容就會貼上", () => {
     { tags: [...tagsConfig.tags, { name: "低軌衛星", keywords: ["低軌衛星", "LEO"] }] },
     companiesConfig,
   );
-  const [m] = custom.tagMentions("昇達科(3491)低軌衛星訂單", matcher.analyze("昇達科(3491)低軌衛星訂單").mentions);
-  assert.deepEqual(m.tags, ["訂單", "低軌衛星"]);
+  const [m] = custom.tagMentions("昇達科(3491)接獲低軌衛星訂單", matcher.analyze("昇達科(3491)接獲低軌衛星訂單").mentions);
+  assert.deepEqual(m.tags, ["新訂單", "低軌衛星"]);
   assert.deepEqual(custom.judge("LEO satellite").tags, ["低軌衛星"]);
 });
 
@@ -130,7 +148,7 @@ test("標籤設定檔：每個標籤都有名稱和關鍵字，名稱不重複",
     assert.ok(t.keywords.length > 0, t.name);
     for (const w of [...t.keywords, ...(t.except ?? [])]) assert.ok(compileKeyword(w), `${t.name}：${w}`);
   }
-  for (const name of ["漲價", "訂單", "營收創高", "合作", "供不應求", "擴產", "轉型", "調升目標價"]) assert.ok(names.includes(name), name);
+  for (const name of ["漲價", "新訂單", "營收創高", "合作", "供不應求", "擴產", "轉型", "調升目標價", "6人說"]) assert.ok(names.includes(name), name);
 });
 
 test("大廠名單：前 100 名、有資料日期和來源、顯示名稱不重複", () => {

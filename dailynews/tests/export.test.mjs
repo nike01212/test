@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codesText, csvText, dayLabel, GROUP_SIZE, splitGroups } from "../public/export.js";
+import { codesText, csvText, dayLabel, GROUP_SIZE, splitGroups, watchGroups } from "../public/export.js";
 
 const make = (n) => Array.from({ length: n }, (_, i) => ({ code: String(1101 + i), name: `股${i}` }));
 
@@ -34,6 +34,16 @@ test("超過 120 檔接著用 C 組", () => {
   assert.deepEqual(
     splitGroups(make(121), "2026-10-24").map((g) => g.label),
     ["1024-A", "1024-B", "1024-C"],
+  );
+});
+
+test("延續性觀察另外一組：1024-延續性觀察", () => {
+  assert.deepEqual(watchGroups([], "2026-10-24"), []);
+  const groups = watchGroups(make(3), "2026-10-24");
+  assert.deepEqual(groups.map((g) => [g.label, g.stocks.length]), [["1024-延續性觀察", 3]]);
+  assert.deepEqual(
+    watchGroups(make(61), "2026-10-24").map((g) => g.label),
+    ["1024-延續性觀察-A", "1024-延續性觀察-B"],
   );
 });
 

@@ -1,10 +1,11 @@
 import { buildMatcher, makeTitle } from "/matcher.js";
-import { codesText, csvText, GROUP_SIZE, splitGroups } from "/export.js";
+import { codesText, csvText, GROUP_SIZE, splitGroups, watchGroups } from "/export.js";
 import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
 import { isPersistent, loadCodes, pruneOld, saveCodes } from "/marks.js";
 import { recognize } from "/ocr.js";
 import { extractUrl, splitPaste } from "/split.js";
 import { buildTagger, describeLabels } from "/tagger.js";
+import { uncheckedCount, watchItems } from "/watch.js";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -225,7 +226,8 @@ function groupStocks(data) {
     if (m.status !== "ok") continue;
     let s = stocks.get(m.code);
     if (!s) {
-      s = { code: m.code, name: m.name, market: m.market, sources: new Map(), manual: false, rows: [] };
+      // mentions 依 id 排好了，第一列就是這檔最早加進清單的那一次
+      s = { code: m.code, name: m.name, market: m.market, sources: new Map(), manual: false, rows: [], addedAt: m.created_at, firstId: m.id };
       stocks.set(m.code, s);
     }
     s.rows.push(m); // 標籤、合作對象是每一則各自存的，畫面上合起來
@@ -240,8 +242,13 @@ function groupStocks(data) {
     s.sources.set(m.article_id, src);
   }
   for (const s of stocks.values()) Object.assign(s, unionLabels(s.rows));
-  // 被越多則提到的排越前面
-  return [...stocks.values()].sort((a, b) => b.sources.size - a.sources.size || a.code.localeCompare(b.code));
+  // 依加進清單的時間，新的在前面（10/23 發起人要求）；同一則裡的照原文出現的順序
+  return [...stocks.values()].sort((a, b) => b.addedAt - a.addedAt || a.firstId - b.firstId);
+}
+
+// 匯出照舊依被提到的則數由多到少排（超過 60 檔拆組時，A 組是被提到最多的）
+function byMentionCount(stocks) {
+  return [...stocks].sort((a, b) => b.sources.size - a.sources.size || a.code.localeCompare(b.code));
 }
 
 // 好幾則的標籤、合作對象合在一起；設定檔讀到了就依設定檔的順序
@@ -281,13 +288,14 @@ function render() {
   $("prev-day").disabled = !data.prevDate;
   $("next-day").disabled = !data.nextDate;
   $("back-today").hidden = isToday;
-  document.title = `${isToday ? "今日清單" : `${shortDate(data.date)}清單`} · 新聞標的整理`;
+  document.title = `${isToday ? "今日清單" : `${shortDate(data.date)}清單`} · 盤後新聞標的整理`;
   renderPasteDay();
 
   $("pending").hidden = pending.length === 0;
   $("pending-count").textContent = pending.length;
   $("pending-list").replaceChildren(...pending.map(renderPending));
 
+  renderWatch();
   renderExport();
   $("stock-list").replaceChildren(
     ...(stocks.length
@@ -357,8 +365,10 @@ function renderStock(s) {
       h("span", { class: "code" }, s.code),
       h("span", { class: "name" }, s.name),
       h("span", { class: "tag" }, s.market),
+      // 「手動新增個股」10/23 拿掉了（漏掉的在預覽裡補），之前手動加的還會顯示「手動新增」
       h("span", { class: "count" }, count ? `${count} 則` : "手動新增"),
-      state.added.has(s.code) ? h("span", { class: "tag added" }, "已加入") : null,
+      streakTag(s.code),
+      addedTag(s.code),
       h(
         "button",
         {
@@ -374,6 +384,128 @@ function renderStock(s) {
     count ? h("ul", { class: "sources" }, [...s.sources.values()].map((src) => renderSource(src, s.code))) : null,
   );
   return card;
+}
+
+// 在「逐檔加入」按過「已加入」的（只記在這台裝置的瀏覽器，別人看不到）
+function addedTag(code) {
+  if (!state.added.has(code)) return null;
+  return h("span", { class: "tag added", title: "在「逐檔加入」按過「已加入」，代表已經加進券商自選；只記在這台裝置" }, "已加入自選");
+}
+
+// ---- 連續被提到、收盤漲停 ----
+
+// 連續被提到幾個交易日（伺服器依休市行事曆算好，2 天以上才有）
+function streakTag(code) {
+  const n = state.data.streaks?.[code];
+  if (!n) return null;
+  const max = state.data.maxStreak;
+  const days = n >= max ? `${max} 天以上` : `${n} 天`;
+  return h("span", { class: "tag streak", title: `連續 ${days}被提到（以交易日算，週末、休市日不算中斷）` }, `連續 ${days}`);
+}
+
+// ---- 延續性觀察（程式裡叫 watch，以前叫續看清單）----
+// 這一頁新聞裡的個股，前一個交易日收盤漲停的（10/23 發起人說明的需求）。比對結果由伺服器存好，
+// 哪幾檔要顯示在 watch.js 算，所以之後才貼的新聞比對完也會出現
+
+const closingCheck = { day: null, busy: false }; // 正在比對哪一頁
+
+function renderWatch() {
+  const w = state.data.watch;
+  const from = shortDate(w.fromDay);
+  const items = watchItems(state.stocks, w);
+  $("watch-count").textContent = items.length;
+  $("watch-help").textContent = `新聞裡的個股如果 ${from}收盤漲停，會自動加進來，${shortDate(state.date)}觀察延續性。`;
+  $("watch-status").replaceChildren(...watchStatus(w));
+  const empty = !state.stocks.length
+    ? "還沒有個股。"
+    : uncheckedCount(state.stocks, w)
+      ? "比對完收盤，漲停的會出現在這裡。"
+      : `清單上的個股 ${from}都沒有收盤漲停。`;
+  $("watch-list").replaceChildren(...(items.length ? items.map(renderWatchItem) : [h("li", { class: "muted" }, empty)]));
+  // 另外存成一組自選，所以匯出放在這一區，不放在上面清單的匯出裡
+  const groups = watchGroups(items, state.date).map((g) => ({ ...g, watch: true }));
+  $("watch-export").hidden = groups.length === 0;
+  $("watch-export-groups").replaceChildren(...groups.map(renderGroup));
+}
+
+function watchStatus(w) {
+  const from = shortDate(w.fromDay);
+  const run = w.run;
+  const unchecked = uncheckedCount(state.stocks, w);
+  const button = (label, all, title) =>
+    h("button", { type: "button", class: "link-button small", title, onclick: () => checkClosing(state.date, { all }) }, label);
+  if (closingCheck.busy && closingCheck.day === state.date) return [h("span", { class: "muted" }, `正在比對${from}的收盤…`)];
+  if (!w.canRun) return [h("span", { class: "muted" }, `${from}收盤後（約 14:30）會自動比對。`)];
+  if (run && run.status !== "done") {
+    const at = taipeiTime(run.updated_at);
+    const text = run.status === "waiting" ? `${from}收盤比對：${run.message}（${at}）。` : `${from}收盤比對失敗：${run.message}（${at}）。`;
+    return [h("span", { class: run.status === "waiting" ? "warn" : "bad" }, `${text}可以按`), button("現在比對", false)];
+  }
+  if (unchecked) return [h("span", { class: "warn" }, `還有 ${unchecked} 檔還沒比對${from}的收盤。`), button("現在比對", false)];
+  if (!state.stocks.length) return [];
+  // 都比對完了就只留按鈕（10/23 發起人要求），上次比對的時間放在滑鼠停上去的提示裡
+  return [button("重新比對", true, run ? `上次比對：${taipeiTime(run.updated_at)}` : undefined)];
+}
+
+function renderWatchItem(item) {
+  // 自動加的本來就是收盤漲停才會進來（一定也在下面的清單裡），不另外標；手動加的才標出來
+  return h(
+    "li",
+    { class: "watch-item" },
+    h("span", { class: "code" }, item.code),
+    h("span", { class: "name" }, item.name),
+    h("span", { class: "tag" }, item.market),
+    item.source === "manual" ? h("span", { class: "tag" }, "手動加入") : null,
+    addedTag(item.code),
+    h(
+      "button",
+      {
+        type: "button",
+        class: "link-button small danger",
+        "aria-label": `把 ${item.code} ${item.name} 移出延續性觀察`,
+        onclick: () => removeWatch(item),
+      },
+      "移出",
+    ),
+  );
+}
+
+async function addWatch(s) {
+  await run(async () => {
+    await api("/api/watch", { method: "POST", body: { date: state.date, code: s.code } });
+    toast(`已把 ${s.code} ${s.name} 加到延續性觀察`);
+    await loadList(state.date);
+  });
+}
+
+async function removeWatch(item) {
+  if (!confirm(`把 ${item.code} ${item.name} 移出 ${shortDate(state.date)}的延續性觀察？`)) return;
+  await run(async () => {
+    await api(`/api/watch?date=${state.date}&code=${encodeURIComponent(item.code)}`, { method: "DELETE" });
+    toast(`已移出 ${item.code} ${item.name}`);
+    await loadList(state.date);
+  });
+}
+
+// 比對 day 這一頁清單上的個股在前一個交易日收盤有沒有漲停。all：整頁重新比對（「重新比對」）；
+// 平常只比對還沒比對過的。quiet：送出新聞後自動跑的，成功就不跳提示
+async function checkClosing(day, { all = false, quiet = false } = {}) {
+  if (closingCheck.busy) return;
+  Object.assign(closingCheck, { day, busy: true });
+  if (state.date === day) renderWatch();
+  try {
+    const r = await api("/api/closing", { method: "POST", body: { date: day, all } });
+    if (r.status === "early") {
+      // 前一個交易日還沒收盤，排程收盤後會比對
+    } else if (r.status !== "done") toast(r.message, "bad");
+    else if (!quiet) toast(`${shortDate(r.day)}收盤比對完成：${r.message}`);
+    else if (r.hits.length) toast(`${r.hits.map((x) => `${x.code} ${x.name}`).join("、")} ${shortDate(r.day)}收盤漲停，加進延續性觀察`);
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    closingCheck.busy = false;
+  }
+  if (state.date === day) await run(() => loadList(day));
 }
 
 // ---- 標籤與合作對象 ----
@@ -600,7 +732,8 @@ async function saveLabelEdit(s) {
 // ---- 匯出 ----
 
 function exportStocks() {
-  return state.exportScope === "picked" ? state.stocks.filter((s) => state.picked.has(s.code)) : state.stocks;
+  const all = byMentionCount(state.stocks);
+  return state.exportScope === "picked" ? all.filter((s) => state.picked.has(s.code)) : all;
 }
 
 function renderExport() {
@@ -642,7 +775,7 @@ function renderExport() {
 function renderGroup(g) {
   return h(
     "div",
-    { class: "export-group" },
+    { class: `export-group${g.watch ? " watch-group" : ""}` },
     h("p", { class: "group-head" }, h("strong", { class: "group-label" }, g.label), h("span", { class: "muted" }, ` ${g.stocks.length} 檔`)),
     h(
       "div",
@@ -1466,6 +1599,8 @@ async function submitPreview() {
   preview.submitting = false;
   if (preview.items.length === 0) setPasteDay(null);
   if (day) await loadList(day).catch((err) => toast(err.message, "bad"));
+  // 新貼的個股馬上比對前一個交易日收盤有沒有漲停（不用等排程）；還沒收盤會直接略過
+  if (day && tally.sent) checkClosing(day, { quiet: true });
 
   const parts = [];
   if (tally.sent) {
@@ -1503,19 +1638,12 @@ async function deleteStock(s) {
   });
 }
 
-async function addStock(s) {
-  await run(async () => {
-    await api("/api/stocks", { method: "POST", body: { date: state.date, code: s.code } });
-    toast(`已新增 ${s.code} ${s.name}`);
-    await loadList(state.date);
-  });
-}
-
 async function resolvePending(g, code) {
   await run(async () => {
     await api("/api/pending/resolve", { method: "POST", body: { ids: g.ids, code } });
     toast(code ? `「${g.raw}」改成 ${stockLabel(code)}` : `已移除「${g.raw}」`);
     await loadList(state.date);
+    if (code) checkClosing(state.date, { quiet: true });
   });
 }
 
@@ -1675,7 +1803,7 @@ $("prev-day").addEventListener("click", () => state.data?.prevDate && run(() => 
 $("next-day").addEventListener("click", () => state.data?.nextDate && run(() => loadList(state.data.nextDate)));
 $("go-today").addEventListener("click", () => run(() => loadList(null)));
 $("date-picker").addEventListener("change", (e) => e.target.value && run(() => loadList(e.target.value)));
-$("add-stock").append(stockPicker({ placeholder: "輸入代號或名稱，例如 2330 或 台積電", onPick: addStock }));
+$("watch-add").append(stockPicker({ placeholder: "手動加到延續性觀察：輸入代號或名稱", onPick: addWatch }));
 $("checker-input").addEventListener("change", runChecker);
 $("checker-input").addEventListener("input", runChecker);
 
