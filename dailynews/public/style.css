@@ -499,6 +499,24 @@ button:disabled {
   margin-top: 8px;
 }
 
+.item-headline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.item-headline span {
+  flex: none;
+  font-size: 0.9rem;
+}
+
+.item-headline input {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+
 .preview-item > .link-button {
   margin-top: 8px;
 }

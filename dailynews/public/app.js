@@ -615,6 +615,7 @@ function newItem(fields) {
     fetch: { status: "idle" }, // idle / loading / ok / partial / failed
     ocr: null, // { status: loading / done / failed }
     images: [], // 圖片的暫時網址（只在這個分頁）
+    headline: "", // 圖片的標題（辨識時找最大的字，可以修改），送出時當成這則的標題
     error: "",
     ...fields,
   };
@@ -642,6 +643,7 @@ function targetDay() {
 
 // 拿來比對個股的內容：網址是抓到的標題和內文，加上自己補貼的
 function itemContent(item) {
+  if (item.type === "image") return [item.headline, item.text].filter((t) => t?.trim()).join("\n");
   if (item.type !== "url") return item.text;
   const f = item.fetch;
   const fetched = f.status === "ok" || f.status === "partial" ? [f.title, f.body] : [];
@@ -650,7 +652,7 @@ function itemContent(item) {
 
 function itemTitle(item) {
   if (item.type === "url") return item.fetch.title || makeTitle(item.note) || makeTitle(item.text) || hostOf(item.url);
-  if (item.type === "image") return `（圖片）${makeTitle(item.text)}`;
+  if (item.type === "image") return item.headline.trim() || makeTitle(item.text) || "（圖片）";
   return makeTitle(item.text) || "（沒有內容）";
 }
 
@@ -690,8 +692,14 @@ function mergeProblem(prev, item) {
 function renderPreview() {
   // 重畫之前記住正在打字的框，畫完把游標放回去
   const active = document.activeElement;
-  const focus = active?.matches?.("#preview-list textarea")
-    ? { id: active.closest("[data-item]").dataset.item, start: active.selectionStart, end: active.selectionEnd, top: active.scrollTop }
+  const focus = active?.matches?.("#preview-list textarea, #preview-list input[type=text]")
+    ? {
+        id: active.closest("[data-item]").dataset.item,
+        tag: active.tagName.toLowerCase(),
+        start: active.selectionStart,
+        end: active.selectionEnd,
+        top: active.scrollTop,
+      }
     : null;
 
   $("preview").hidden = preview.items.length === 0;
@@ -700,7 +708,7 @@ function renderPreview() {
   renderPreviewFooter();
 
   if (focus) {
-    const box = $("preview-list").querySelector(`[data-item="${focus.id}"] textarea`);
+    const box = $("preview-list").querySelector(`[data-item="${focus.id}"] ${focus.tag === "input" ? "input[type=text]" : "textarea"}`);
     if (box) {
       box.focus({ preventScroll: true });
       box.setSelectionRange(focus.start, focus.end);
@@ -814,6 +822,26 @@ function urlBody(item, index) {
   ];
 }
 
+// 圖片的標題：送出時存成這則的標題（清單上看得到），辨識錯的字可以在這裡改
+function headlineBox(item, index) {
+  return h(
+    "label",
+    { class: "item-headline" },
+    h("span", { class: "muted" }, "標題"),
+    h("input", {
+      type: "text",
+      value: item.headline,
+      placeholder: item.ocr?.status === "loading" ? "辨識完會自動填入" : "沒找到標題，可以自己打",
+      disabled: item.ocr?.status === "loading",
+      "aria-label": `第 ${index + 1} 則的標題`,
+      oninput: (e) => {
+        item.headline = e.target.value;
+        scheduleItemInfo(item);
+      },
+    }),
+  );
+}
+
 function ocrStepText(o) {
   const pct = o.progress ? ` ${Math.round(o.progress * 100)}%` : "";
   const first = /下載/.test(o.step) ? "（第一次使用要下載約 6 MB，之後就不用）" : "";
@@ -895,6 +923,7 @@ function renderItem(item, index) {
     ),
     item.type === "url" ? urlBody(item, index) : null,
     item.images.length ? imageBody(item) : null,
+    item.type === "image" ? headlineBox(item, index) : null,
     item.type !== "url" ? textBox(item, index, item.type === "image" ? "辨識出來的文字" : "這則的內容") : null,
     foundLine(item, st),
     item.error ? h("p", { class: "bad item-error" }, item.error) : null,
@@ -1030,11 +1059,12 @@ async function fetchArticle(item) {
 
 async function runOcr(item, file) {
   try {
-    const text = await recognize(file, (p) => {
+    const { text, headline } = await recognize(file, (p) => {
       item.ocr = { status: "loading", ...p };
       updateOcrProgress(item);
     });
     item.text = joinText(item.text, text);
+    item.headline ||= headline;
     item.ocr = { status: "done" };
   } catch (err) {
     console.error("ocr", err);
