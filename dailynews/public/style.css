@@ -802,8 +802,33 @@ mark {
   color: var(--label-text);
 }
 
-.partner-add {
-  padding: 4px 8px;
+/* 自己填標籤、搜尋合作對象 */
+.label-input {
+  display: inline-flex;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.label-input input {
+  width: 9em;
+  min-width: 0;
+  padding: 4px 10px;
+}
+
+.label-input button {
+  padding: 4px 12px;
+}
+
+.partner-picker {
+  flex: 1 1 100%;
+}
+
+.partner-picker input {
+  padding: 6px 10px;
+}
+
+.suggestion.custom {
+  color: var(--muted);
 }
 
 .label-help {

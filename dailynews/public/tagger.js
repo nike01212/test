@@ -10,6 +10,8 @@ const LABEL_SEPARATOR = "、";
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const isWordChar = (c) => c !== undefined && /[A-Z0-9]/.test(c);
 const list = (v) => (Array.isArray(v) ? v : []);
+// 搜尋用：全形半形、大小寫、空白都不管
+const searchKey = (s) => normalize(String(s ?? "")).replace(/\s+/g, "");
 
 // 「營收*新高」→ 營收、同一句裡隔最多 20 個字、新高。英文開頭結尾要整個字對上（ARM 不會對到 ARMY），空白可有可無
 export function compileKeyword(word, flags = "u") {
@@ -65,6 +67,8 @@ export function buildTagger(tagsConfig = {}, companiesConfig = {}) {
   const companies = [...list(companiesConfig.companies), ...list(companiesConfig.others)]
     .map((c) => ({
       label: companyLabel(c),
+      // 手動加合作對象時搜尋用：中英文名稱、代號、別名（沒有別名、不自動比對的銀行也搜得到）
+      keys: [...new Set([companyLabel(c), c?.zh, c?.en, c?.ticker, ...list(c?.aliases)].map(searchKey).filter(Boolean))],
       aliases: list(c?.aliases).map((w) => compileKeyword(w)).filter(Boolean),
       except: list(c?.except).map((w) => compileKeyword(w, "gu")).filter(Boolean),
     }))
@@ -117,9 +121,30 @@ export function buildTagger(tagsConfig = {}, companiesConfig = {}) {
     };
   }
 
+  // 手動加合作對象：完全一樣的排最前面，再來是開頭一樣、包含這幾個字的；同一級依名單順序（市值排名）
+  function searchCompanies(query, limit = 8) {
+    const q = searchKey(query);
+    if (!q) return [];
+    const scored = [];
+    companies.forEach((c, i) => {
+      const score = c.keys.includes(q) ? 0 : c.keys.some((k) => k.startsWith(q)) ? 1 : c.keys.some((k) => k.includes(q)) ? 2 : -1;
+      if (score >= 0) scored.push([score, i, c.label]);
+    });
+    scored.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    return [...new Set(scored.map(([, , label]) => label))].slice(0, limit);
+  }
+
+  // 打的字剛好是名單裡某家的名稱或別名（例如「nvidia」）就回傳它的顯示名稱，不是就回傳 null
+  function findCompany(text) {
+    const q = searchKey(text);
+    return (q && companies.find((c) => c.keys.includes(q))?.label) || null;
+  }
+
   return {
     tagNames,
     companyLabels,
+    searchCompanies,
+    findCompany,
     judge: (text) => judgeNormalized(normalize(String(text ?? ""))),
     tagMentions,
     union,

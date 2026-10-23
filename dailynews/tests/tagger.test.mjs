@@ -173,6 +173,32 @@ test("高通、索尼等不在前 100 名的也對得到，常見詞裡的字不
   assert.deepEqual(tagger.union([{ partners: ["高通（Qualcomm）", "輝達（NVIDIA）"] }]).partners, ["輝達（NVIDIA）", "高通（Qualcomm）"]);
 });
 
+test("手動加合作對象：搜尋名單（中英文、別名、代號、全形半形都可以）", () => {
+  assert.equal(tagger.searchCompanies("nvidia")[0], "輝達（NVIDIA）");
+  assert.equal(tagger.searchCompanies("ＮＶＤＡ")[0], "輝達（NVIDIA）");
+  assert.equal(tagger.searchCompanies("輝")[0], "輝達（NVIDIA）");
+  assert.equal(tagger.searchCompanies("高通")[0], "高通（Qualcomm）");
+  assert.equal(tagger.searchCompanies("sony")[0], "索尼（Sony）");
+  // 不自動比對的銀行、台股也搜得到，要手動加的時候可以加
+  assert.equal(tagger.searchCompanies("高盛")[0], "高盛（Goldman Sachs）");
+  assert.equal(tagger.searchCompanies("台積")[0], "台積電（TSMC）");
+  // 開頭一樣的排在只是包含的前面；最多 8 個
+  const micro = tagger.searchCompanies("micro");
+  assert.deepEqual(micro.slice(0, 3), ["微軟（Microsoft）", "美光（Micron）", "微芯（Microchip）"]);
+  assert.ok(micro.indexOf("美超微（Supermicro）") > 2);
+  assert.ok(tagger.searchCompanies("a").length <= 8);
+  assert.deepEqual(tagger.searchCompanies("  "), []);
+  assert.deepEqual(tagger.searchCompanies("某某不存在的公司"), []);
+});
+
+test("打的字剛好是名單裡的公司，就用名單的顯示名稱", () => {
+  assert.equal(tagger.findCompany("nvidia"), "輝達（NVIDIA）");
+  assert.equal(tagger.findCompany(" Sony "), "索尼（Sony）");
+  assert.equal(tagger.findCompany("輝達（NVIDIA）"), "輝達（NVIDIA）");
+  assert.equal(tagger.findCompany("三星電機"), null);
+  assert.equal(tagger.findCompany(""), null);
+});
+
 test("大廠別名不會和其他大廠重複", () => {
   const seen = new Map();
   for (const c of [...companiesConfig.companies, ...companiesConfig.others]) {

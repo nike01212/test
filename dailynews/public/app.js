@@ -437,14 +437,94 @@ function labelOption(set, value, name) {
   );
 }
 
+// 自己填的標籤、合作對象最長幾個字（伺服器最多收 40 字）
+const CUSTOM_TAG_LENGTH = 20;
+const CUSTOM_PARTNER_LENGTH = 40;
+const tidyLabel = (text) => text.replace(/\s+/g, " ").trim();
+
+// 加完一個之後重畫編輯區，游標放回原本的輸入框，可以接著加下一個
+function addToDraft(s, input, set, value, selector) {
+  set.add(value);
+  const card = input.closest(".stock");
+  redrawLabels(s, card);
+  card?.querySelector(selector)?.focus();
+}
+
+// 自己填標籤：設定檔裡沒有的也可以加，只加在這一檔
+function customTagInput(s, edit) {
+  const input = h("input", {
+    type: "text",
+    class: "custom-tag",
+    placeholder: "自己填標籤",
+    maxlength: CUSTOM_TAG_LENGTH,
+    enterkeyhint: "done",
+    autocomplete: "off",
+    "aria-label": `幫 ${s.code} ${s.name} 自己填標籤`,
+  });
+  const add = () => {
+    const name = tidyLabel(input.value);
+    if (name) addToDraft(s, input, edit.tags, name, ".custom-tag");
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      add();
+    }
+  });
+  return h("span", { class: "label-input" }, input, h("button", { type: "button", class: "secondary", onclick: add }, "加入"));
+}
+
+// 加合作對象：搜尋大廠名單（中英文、別名、代號都可以），名單裡沒有的就照打的字加
+function partnerSearch(s, edit) {
+  const input = h("input", {
+    type: "search",
+    class: "partner-search",
+    placeholder: "搜尋大廠，或直接打公司名稱",
+    maxlength: CUSTOM_PARTNER_LENGTH,
+    enterkeyhint: "done",
+    autocomplete: "off",
+    "aria-label": `幫 ${s.code} ${s.name} 加合作對象`,
+  });
+  const list = h("ul", { class: "suggestions", hidden: true });
+  let options = [];
+  const add = (label) => addToDraft(s, input, edit.partners, label, ".partner-search");
+
+  function update() {
+    const text = tidyLabel(input.value);
+    const tagger = state.tagger || null;
+    options = text && tagger ? tagger.searchCompanies(text).filter((c) => !edit.partners.has(c)) : [];
+    // 打的字剛好是名單裡的公司（例如 nvidia）就用名單的名稱，不另外列「自己填」
+    const known = tagger?.findCompany(text);
+    const custom = text && !known && !edit.partners.has(text) ? text : null;
+    const items = options.map((label) => h("li", {}, h("button", { type: "button", class: "suggestion", onclick: () => add(label) }, label)));
+    if (custom) {
+      items.push(h("li", {}, h("button", { type: "button", class: "suggestion custom", onclick: () => add(custom) }, `自己填「${custom}」`)));
+      options = [...options, custom];
+    }
+    list.replaceChildren(...items);
+    list.hidden = options.length === 0;
+  }
+
+  input.addEventListener("input", update);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (options[0]) add(options[0]);
+    } else if (e.key === "Escape") {
+      input.value = "";
+      update();
+    }
+  });
+  return h("div", { class: "picker partner-picker" }, input, list);
+}
+
 function renderLabelEditor(s) {
   const edit = state.labelEdit;
   const tagger = state.tagger || null;
-  // 設定檔裡的標籤，加上已經存下來、但設定檔裡沒有的（改名或刪掉的），才拿得掉
-  const tagNames = [...new Set([...(tagger?.tagNames ?? []), ...edit.base.tags])];
+  // 設定檔裡的標籤，加上已經存下來、但設定檔裡沒有的（改名、刪掉或自己填的），才拿得掉
+  const tagNames = [...new Set([...(tagger?.tagNames ?? []), ...edit.base.tags, ...edit.tags])];
   const partnerList = [...edit.base.partners, ...edit.partners];
   const partnerNames = tagger ? tagger.sortPartners(partnerList) : [...new Set(partnerList)];
-  const addable = (tagger?.companyLabels ?? []).filter((c) => !partnerNames.includes(c));
   const editor = h(
     "div",
     { class: "label-editor" },
@@ -452,33 +532,23 @@ function renderLabelEditor(s) {
       "fieldset",
       {},
       h("legend", {}, "標籤"),
-      tagNames.length
-        ? tagNames.map((t) => labelOption(edit.tags, t, `tags-${s.code}`))
-        : h("span", { class: "muted" }, state.tagger === null ? "標籤設定載入中…" : "標籤設定讀取失敗（public/data/tags.json）"),
+      tagNames.map((t) => labelOption(edit.tags, t, `tags-${s.code}`)),
+      state.tagger === null ? h("span", { class: "muted" }, "標籤設定載入中…") : null,
+      state.tagger === false ? h("span", { class: "warn" }, "標籤設定讀取失敗（public/data/tags.json）") : null,
+      customTagInput(s, edit),
     ),
     h(
       "fieldset",
       {},
       h("legend", {}, "合作對象"),
       partnerNames.map((p) => labelOption(edit.partners, p, `partners-${s.code}`)),
-      addable.length
-        ? h(
-            "select",
-            {
-              class: "partner-add",
-              "aria-label": `幫 ${s.code} ${s.name} 加合作對象`,
-              onchange: (e) => {
-                if (!e.target.value) return;
-                edit.partners.add(e.target.value);
-                redrawLabels(s, e.target.closest(".stock"));
-              },
-            },
-            h("option", { value: "" }, "加合作對象…"),
-            addable.map((c) => h("option", { value: c }, c)),
-          )
-        : null,
+      partnerSearch(s, edit),
     ),
-    h("p", { class: "muted label-help" }, "改的是這一天的這一檔，提到它的每一則都會一起改。"),
+    h(
+      "p",
+      { class: "muted label-help" },
+      "改的是這一天的這一檔，提到它的每一則都會一起改。自己填的只加在這裡；想讓以後的新聞自動判斷，要請發起人加進設定檔。",
+    ),
     h(
       "div",
       { class: "label-actions" },
