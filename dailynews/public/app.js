@@ -10,6 +10,7 @@ const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
 const MAX_SOURCE_SENTENCES = 2;
 const QUICK_HINT = "點代號可以複製";
+const COMPANY_LIST_REFRESH_DAYS = 183; // 國際大廠名單大約每半年照市值排名更新一次，超過就在網頁最下面提醒
 
 const state = {
   date: null, // 目前看的那一天
@@ -1525,7 +1526,9 @@ async function loadTagger() {
   try {
     const [tags, companies] = await Promise.all(["/data/tags.json", "/data/big-companies.json"].map(fetchJson));
     state.tagger = buildTagger(tags, companies);
-    state.tagInfo = ` · 標籤 ${state.tagger.tagNames.length} 個、國際大廠 ${state.tagger.companyLabels.length} 家（${companies.updated ?? "沒寫日期"}）`;
+    const age = (Date.now() - Date.parse(`${companies.updated}T00:00:00+08:00`)) / 86_400_000;
+    const stale = !(age <= COMPANY_LIST_REFRESH_DAYS) ? "，超過半年沒更新了" : "";
+    state.tagInfo = ` · 標籤 ${state.tagger.tagNames.length} 個、國際大廠 ${state.tagger.companyLabels.length} 家（${companies.updated ?? "沒寫日期"}${stale}）`;
   } catch (err) {
     state.tagger = false;
     toast(`標籤設定讀取失敗：${err.message}。送出的資料不會有標籤和合作對象。`, "bad");

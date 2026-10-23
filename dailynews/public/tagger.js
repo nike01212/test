@@ -1,6 +1,6 @@
 // 標籤與國際大廠合作對象：在瀏覽器裡判斷（伺服器每次請求只有 10ms CPU），送出時和個股一起存。
 // 網址和文字不存全文，送出之後就不能重算，所以要在送出前、瀏覽器手上還有完整內容的時候判斷好。
-// 設定檔：public/data/tags.json（標籤和關鍵字）、public/data/big-companies.json（全球市值前 100 名），由發起人手動維護。
+// 設定檔：public/data/tags.json（標籤和關鍵字）、public/data/big-companies.json（全球市值前 100 名＋其他知名企業），由發起人手動維護。
 import { normalize } from "./matcher.js";
 
 const GAP = 20; // 關鍵字裡的 * 最多隔幾個字
@@ -61,7 +61,8 @@ export function buildTagger(tagsConfig = {}, companiesConfig = {}) {
       except: list(t?.except).map((w) => compileKeyword(w, "gu")).filter(Boolean),
     }))
     .filter((t) => t.name && t.keywords.length);
-  const companies = list(companiesConfig.companies)
+  // 前 100 名依排名，後面接其他知名企業（依檔案裡的順序）
+  const companies = [...list(companiesConfig.companies), ...list(companiesConfig.others)]
     .map((c) => ({
       label: companyLabel(c),
       aliases: list(c?.aliases).map((w) => compileKeyword(w)).filter(Boolean),

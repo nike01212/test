@@ -134,3 +134,11 @@ test("每檔記下在原文裡出現的位置（標籤判斷用）", () => {
   const tsmc = r.mentions.find((m) => m.code === "2330");
   assert.deepEqual(tsmc.spans.map(([s, e]) => text.slice(s, e)), ["台積電"]);
 });
+
+test("「事業強勁」「產業旺季」裡的字不是業強、業旺", () => {
+  assert.deepEqual(okCodes(matcher.analyze("信邦表示，受惠工業應用、醫療及健康照護等高毛利核心事業強勁成長，")), ["3023"]);
+  assert.deepEqual(okCodes(matcher.analyze("電子業旺季效應發酵，半導體產業強化布局")), []);
+  // 真的在講業強、業旺時照樣對得到
+  assert.deepEqual(okCodes(matcher.analyze("業強(6124)營收強勁")), ["6124"]);
+  assert.deepEqual(okCodes(matcher.analyze("業強今年營收創新高，業旺接單暢旺")).sort(), ["1475", "6124"]);
+});

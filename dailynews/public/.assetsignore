@@ -1,0 +1,2 @@
+# 不要上傳到網站的檔案（Mac 的 Finder 會自動產生 .DS_Store）
+.DS_Store

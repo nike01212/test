@@ -69,7 +69,7 @@ test("except：含有關鍵字但不是那個意思的詞不算", () => {
   assert.deepEqual(tagger.judge("合作金庫與輝達合作").tags, ["合作"]);
   assert.deepEqual(tagger.judge("現在是最佳切入點").tags, []);
   assert.deepEqual(tagger.judge("打入蘋果供應鏈").tags, ["訂單"]);
-  assert.deepEqual(tagger.judge("美超微伺服器出貨").partners, []);
+  assert.deepEqual(tagger.judge("美超微伺服器出貨").partners, ["美超微（Supermicro）"]); // 不是超微（AMD）
   assert.deepEqual(tagger.judge("超微MI450").partners, ["超微（AMD）"]);
   assert.deepEqual(tagger.judge("蘋果日報報導").partners, []);
 });
@@ -149,9 +149,33 @@ test("大廠名單：前 100 名、有資料日期和來源、顯示名稱不重
   }
 });
 
+test("其他知名企業：有英文名稱、顯示名稱不和前 100 名重複", () => {
+  assert.ok(companiesConfig.others.length > 0);
+  const labels = [...companiesConfig.companies, ...companiesConfig.others].map(companyLabel);
+  assert.equal(new Set(labels).size, labels.length);
+  for (const c of companiesConfig.others) {
+    assert.ok(c.en, JSON.stringify(c));
+    assert.ok(c.aliases.length > 0, `${c.en} 沒有別名`);
+    assert.equal(c.rank, undefined, `${c.en} 不在前 100 名，不用寫排名`);
+  }
+});
+
+test("高通、索尼等不在前 100 名的也對得到，常見詞裡的字不算", () => {
+  assert.deepEqual(tagger.judge("搭載高通驍龍晶片").partners, ["高通（Qualcomm）"]);
+  assert.deepEqual(tagger.judge("Sony 影像感測器、美超微伺服器").partners, ["索尼（Sony）", "美超微（Supermicro）"]);
+  assert.deepEqual(tagger.judge("取得OpenAI訂單").partners, ["OpenAI"]);
+  for (const text of ["提高通路庫存", "高通膨壓力", "其中芯片需求", "提高意願", "以中華為例", "令人聯想", "創新思維"]) {
+    assert.deepEqual(tagger.judge(text).partners, [], text);
+  }
+  // 美超微、超微電腦不是超微（AMD）
+  assert.deepEqual(tagger.judge("超微電腦").partners, ["美超微（Supermicro）"]);
+  // 前 100 名排前面，其他知名企業接在後面
+  assert.deepEqual(tagger.union([{ partners: ["高通（Qualcomm）", "輝達（NVIDIA）"] }]).partners, ["輝達（NVIDIA）", "高通（Qualcomm）"]);
+});
+
 test("大廠別名不會和其他大廠重複", () => {
   const seen = new Map();
-  for (const c of companiesConfig.companies) {
+  for (const c of [...companiesConfig.companies, ...companiesConfig.others]) {
     for (const a of c.aliases) {
       const key = compileKeyword(a).source;
       assert.ok(!seen.has(key), `「${a}」同時是 ${seen.get(key)} 和 ${c.en} 的別名`);
