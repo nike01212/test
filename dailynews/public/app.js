@@ -286,6 +286,22 @@ function render() {
   );
 }
 
+// 圖片的出處：「（圖片）B3 上市櫃 1 | 2026. 10. 22 | 工商時報」
+function articleOrigin(a) {
+  return a?.kind === "image" ? h("span", { class: "origin muted" }, `（圖片）${a.source ?? ""}`) : null;
+}
+
+// 圖片辨識出來的全文，預設收起來
+function articleBody(a) {
+  if (!a?.body) return null;
+  return h(
+    "details",
+    { class: "article-body" },
+    h("summary", {}, `辨識出來的全文（${a.body.length.toLocaleString()} 字）`),
+    h("p", {}, a.body),
+  );
+}
+
 function renderSource(src, code, extra) {
   return h(
     "li",
@@ -296,7 +312,9 @@ function renderSource(src, code, extra) {
       src.article ? articleLink(src.article) : "（這則已刪除）",
       src.article ? h("span", { class: "muted" }, ` · ${taipeiTime(src.article.pasted_at)}`) : null,
     ),
+    articleOrigin(src.article),
     src.sentences.map((t) => h("blockquote", {}, highlight(t, code, extra))),
+    articleBody(src.article),
   );
 }
 
@@ -561,6 +579,8 @@ function renderArticle(a) {
     "li",
     { class: "article" },
     h("p", { class: "article-title" }, h("span", { class: "muted" }, `${taipeiTime(a.pasted_at)} `), articleLink(a)),
+    articleOrigin(a),
+    articleBody(a),
     h(
       "div",
       { class: "article-meta" },
@@ -616,6 +636,7 @@ function newItem(fields) {
     ocr: null, // { status: loading / done / failed }
     images: [], // 圖片的暫時網址（只在這個分頁）
     headline: "", // 圖片的標題（辨識時找最大的字，可以修改），送出時當成這則的標題
+    source: "", // 圖片的出處（標題上面那行，通常是版名和日期），送出時存起來
     error: "",
     ...fields,
   };
@@ -695,7 +716,8 @@ function renderPreview() {
   const focus = active?.matches?.("#preview-list textarea, #preview-list input[type=text]")
     ? {
         id: active.closest("[data-item]").dataset.item,
-        tag: active.tagName.toLowerCase(),
+        // 圖片有標題、出處兩個欄位，用 class 分辨是哪一個
+        selector: active.tagName === "TEXTAREA" ? "textarea" : `input.${active.classList[0]}`,
         start: active.selectionStart,
         end: active.selectionEnd,
         top: active.scrollTop,
@@ -708,7 +730,7 @@ function renderPreview() {
   renderPreviewFooter();
 
   if (focus) {
-    const box = $("preview-list").querySelector(`[data-item="${focus.id}"] ${focus.tag === "input" ? "input[type=text]" : "textarea"}`);
+    const box = $("preview-list").querySelector(`[data-item="${focus.id}"] ${focus.selector}`);
     if (box) {
       box.focus({ preventScroll: true });
       box.setSelectionRange(focus.start, focus.end);
@@ -822,20 +844,21 @@ function urlBody(item, index) {
   ];
 }
 
-// 圖片的標題：送出時存成這則的標題（清單上看得到），辨識錯的字可以在這裡改
-function headlineBox(item, index) {
+// 圖片的標題、出處：送出時存起來（清單上看得到），辨識錯的字可以在這裡改
+function fieldBox(item, index, key, label, emptyHint) {
   return h(
     "label",
-    { class: "item-headline" },
-    h("span", { class: "muted" }, "標題"),
+    { class: "item-field" },
+    h("span", { class: "muted" }, label),
     h("input", {
       type: "text",
-      value: item.headline,
-      placeholder: item.ocr?.status === "loading" ? "辨識完會自動填入" : "沒找到標題，可以自己打",
+      class: `field-${key}`,
+      value: item[key],
+      placeholder: item.ocr?.status === "loading" ? "辨識完會自動填入" : emptyHint,
       disabled: item.ocr?.status === "loading",
-      "aria-label": `第 ${index + 1} 則的標題`,
+      "aria-label": `第 ${index + 1} 則的${label}`,
       oninput: (e) => {
-        item.headline = e.target.value;
+        item[key] = e.target.value;
         scheduleItemInfo(item);
       },
     }),
@@ -923,7 +946,8 @@ function renderItem(item, index) {
     ),
     item.type === "url" ? urlBody(item, index) : null,
     item.images.length ? imageBody(item) : null,
-    item.type === "image" ? headlineBox(item, index) : null,
+    item.type === "image" ? fieldBox(item, index, "headline", "標題", "沒找到標題，可以自己打") : null,
+    item.type === "image" ? fieldBox(item, index, "source", "出處", "例如：B3 上市櫃 | 2026.10.22 | 工商時報") : null,
     item.type !== "url" ? textBox(item, index, item.type === "image" ? "辨識出來的文字" : "這則的內容") : null,
     foundLine(item, st),
     item.error ? h("p", { class: "bad item-error" }, item.error) : null,
@@ -1059,12 +1083,13 @@ async function fetchArticle(item) {
 
 async function runOcr(item, file) {
   try {
-    const { text, headline } = await recognize(file, (p) => {
+    const { text, headline, source } = await recognize(file, (p) => {
       item.ocr = { status: "loading", ...p };
       updateOcrProgress(item);
     });
     item.text = joinText(item.text, text);
     item.headline ||= headline;
+    item.source ||= source;
     item.ocr = { status: "done" };
   } catch (err) {
     console.error("ocr", err);
@@ -1147,6 +1172,10 @@ async function submitPreview() {
         body: {
           title: itemTitle(item),
           url: item.type === "url" ? item.url : null,
+          kind: item.type,
+          // 圖片另外存出處和辨識出來的全文；網址和文字只存擷取句
+          source: item.type === "image" ? item.source : null,
+          body: item.type === "image" ? item.text : null,
           tradingDay: state.pasteDay,
           mentions: st.analysis.mentions.map((m) => Object.fromEntries(MENTION_FIELDS.map((k) => [k, m[k]]))),
         },

@@ -11,7 +11,7 @@ import {
   sessionCookie,
   tooManyFailures,
 } from "./auth";
-import { handleApi } from "./api";
+import { handleApi, pruneOldBodies } from "./api";
 import { json } from "./http";
 
 // 沒登入也能拿到的東西：登入頁本身和它需要的檔案
@@ -99,5 +99,11 @@ async function route(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request, env): Promise<Response> {
     return withSiteHeaders(await route(request, env));
+  },
+  // wrangler.jsonc 的 triggers：每天台北時間 03:00 清掉太舊的圖片全文
+  async scheduled(_controller, env, ctx): Promise<void> {
+    ctx.waitUntil(
+      pruneOldBodies(env).then(({ before, cleared }) => console.log(`圖片全文：清掉 ${before} 以前的 ${cleared} 則`)),
+    );
   },
 } satisfies ExportedHandler<Env>;

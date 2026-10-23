@@ -15,7 +15,7 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "npx wrangler d1 migrations apply DB --local --persist-to .wrangler/state-8788 && npx wrangler dev --port 8788 --persist-to .wrangler/state-8788"
+        "npx wrangler d1 migrations apply DB --local --persist-to .wrangler/state-8788 && npx wrangler dev --port 8788 --persist-to .wrangler/state-8788 --test-scheduled"
       ],
       "port": 8788
     }

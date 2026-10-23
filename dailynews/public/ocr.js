@@ -52,7 +52,7 @@ const HEADLINE_PAD = 0.15; // 裁切時四周多留行高的幾倍
 const hanCount = (s) => (s.match(/\p{Script=Han}/gu) ?? []).length;
 
 // 從辨識出來的每一行（依閱讀順序，含位置）找出標題：比內文大很多的那一行，連同前後一樣大的行
-// （標題常被拆成兩行或左右兩段）。找不到回傳 null
+// （標題常被拆成兩行或左右兩段）。標題上面還有字的話，第一行通常是版名和日期，當成出處。找不到標題回傳 null
 export function findHeadline(lines) {
   const rows = lines
     .map((l) => ({ text: l.text, bbox: l.bbox, height: l.bbox.y1 - l.bbox.y0 }))
@@ -70,6 +70,7 @@ export function findHeadline(lines) {
   const group = rows.slice(from, to + 1);
   return {
     text: tidyOcrText(group.map((l) => l.text).join("\n")).replace(/\n/g, ""),
+    source: from > 0 ? tidyOcrText(rows[0].text) : "",
     lineHeight: max,
     bbox: {
       x0: Math.min(...group.map((l) => l.bbox.x0)),
@@ -153,7 +154,7 @@ async function readHeadline(worker, image, headline) {
   }
 }
 
-// 辨識一張圖，回傳 { text: 整理過的全文, headline: 標題（找不到是空字串） }。
+// 辨識一張圖，回傳 { text: 整理過的全文, headline: 標題, source: 出處（例如版名和日期） }，找不到的是空字串。
 // onProgress({ step, progress }) 回報進度（progress 是 0～1）
 export function recognize(file, onProgress) {
   const job = queue.then(async () => {
@@ -168,7 +169,7 @@ export function recognize(file, onProgress) {
       const found = findHeadline(lines);
       report = null; // 標題重新辨識很快，不用再回報進度
       const headline = found ? await readHeadline(worker, image, found) : "";
-      return { text: tidyOcrText(data.text), headline };
+      return { text: tidyOcrText(data.text), headline, source: found?.source ?? "" };
     } finally {
       report = null;
     }

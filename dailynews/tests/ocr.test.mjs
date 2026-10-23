@@ -34,8 +34,13 @@ const PAGE = [
 test("找標題：比內文大很多的字，左右兩段合成一個", () => {
   const h = findHeadline(PAGE);
   assert.equal(h.text, "太旺量測設備攻康程症級商機");
+  assert.equal(h.source, "B3 上市櫃 1 | 2026. 10. 22 | 工商時報");
   assert.deepEqual(h.bbox, { x0: 70, y0: 148, x1: 1974, y1: 302 });
   assert.equal(h.lineHeight, 154);
+});
+
+test("標題上面沒有字就沒有出處", () => {
+  assert.equal(findHeadline(PAGE.slice(1)).source, "");
 });
 
 test("字都差不多大（例如 memo 截圖）就沒有標題", () => {

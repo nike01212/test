@@ -499,22 +499,49 @@ button:disabled {
   margin-top: 8px;
 }
 
-.item-headline {
+.item-field {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 8px;
 }
 
-.item-headline span {
+.item-field span {
   flex: none;
   font-size: 0.9rem;
 }
 
-.item-headline input {
+.item-field input {
   flex: 1;
   min-width: 0;
+}
+
+.item-field .field-headline {
   font-weight: 600;
+}
+
+/* 清單上的出處、圖片全文 */
+.origin {
+  display: block;
+  font-size: 0.85rem;
+}
+
+.article-body {
+  margin-top: 4px;
+  font-size: 0.9rem;
+}
+
+.article-body summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.article-body p {
+  margin: 6px 0 0;
+  white-space: pre-line;
+  max-height: 24em;
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 
 .preview-item > .link-button {

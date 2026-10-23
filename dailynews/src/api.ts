@@ -4,14 +4,18 @@ import { cleanUrl } from "../public/links.js";
 import { handleFetch } from "./fetchPage";
 import { json, readJson } from "./http";
 import { findStock } from "./stocks";
-import { assignTradingDay, isIsoDate, parseTaipeiLocal, type Calendar } from "./tradingDay";
+import { addDays, assignTradingDay, isIsoDate, parseTaipeiLocal, taipeiParts, type Calendar } from "./tradingDay";
 
 const calendar: Calendar = holidays;
 
-// 依 PRD 只存擷取句，不存全文；每檔每則最多 2 句
+// 依 PRD 只存擷取句，不存全文；每檔每則最多 2 句。例外是圖片辨識出來的全文（10/23 發起人決定要存）
 const MAX_SENTENCES = 2;
 const MAX_SENTENCE_LENGTH = 300;
 const MAX_TITLE_LENGTH = 120;
+const MAX_SOURCE_LENGTH = 120;
+const MAX_BODY_LENGTH = 20_000; // 圖片全文：一整版報紙大約一萬字
+export const BODY_KEEP_DAYS = 180; // 圖片全文保留幾天（10/23 發起人決定），之後每天排程刪掉
+const KINDS = new Set(["url", "text", "image"]);
 const MAX_URL_LENGTH = 1000;
 const MAX_MENTIONS_PER_ARTICLE = 200;
 const MAX_CANDIDATES = 10;
@@ -36,6 +40,18 @@ function nowSeconds(): number {
 
 function cleanText(v: unknown, max: number): string {
   return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
+}
+
+// 保留換行（段落）的版本，給圖片全文用
+function cleanBody(v: unknown, max: number): string {
+  if (typeof v !== "string") return "";
+  return v
+    .replace(/\r\n?/g, "\n")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, max);
 }
 
 function cleanSentences(v: unknown): string[] {
@@ -93,7 +109,9 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   const date = dateParam ?? today.tradingDay;
 
   const [articles, mentions, prev, next] = await env.DB.batch([
-    env.DB.prepare("SELECT id, title, url, pasted_at FROM articles WHERE trading_day = ? ORDER BY pasted_at, id").bind(date),
+    env.DB.prepare(
+      "SELECT id, title, url, kind, source, body, pasted_at FROM articles WHERE trading_day = ? ORDER BY pasted_at, id",
+    ).bind(date),
     env.DB.prepare(
       "SELECT id, article_id, code, name, market, status, raw, reason, candidates, sentences FROM mentions WHERE trading_day = ? ORDER BY id",
     ).bind(date),
@@ -116,7 +134,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   });
 }
 
-// POST /api/articles：瀏覽器比對完的結果。內容只有標題、網址和擷取句，沒有全文
+// POST /api/articles：瀏覽器比對完的結果。內容是標題、網址、出處和擷取句；圖片另外存辨識出來的全文
 async function handleCreateArticle(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (!body) return badRequest("格式錯誤");
@@ -133,6 +151,10 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
     url = typeof body.url === "string" ? cleanUrl(body.url) : null;
     if (!url || url.length > MAX_URL_LENGTH) return badRequest("網址格式不對");
   }
+  const kind = typeof body.kind === "string" && KINDS.has(body.kind) ? body.kind : url ? "url" : "text";
+  const source = cleanText(body.source, MAX_SOURCE_LENGTH) || null;
+  // 全文只存圖片的
+  const fullText = kind === "image" ? cleanBody(body.body, MAX_BODY_LENGTH) || null : null;
   if (!Array.isArray(body.mentions) || body.mentions.length === 0) return badRequest("這則沒有找到個股");
   if (body.mentions.length > MAX_MENTIONS_PER_ARTICLE) return badRequest("一則提到的個股太多了，請分開貼");
 
@@ -160,12 +182,9 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   // 同一個 batch 是一筆交易，中間不會有別人插進來，所以可以用 MAX(id) 拿到剛新增的那一則
   const articleId = "(SELECT MAX(id) FROM articles)";
   const statements = [
-    env.DB.prepare("INSERT INTO articles (trading_day, title, url, pasted_at) VALUES (?, ?, ?, ?) RETURNING id").bind(
-      tradingDay,
-      title,
-      url,
-      created,
-    ),
+    env.DB.prepare(
+      "INSERT INTO articles (trading_day, title, url, kind, source, body, pasted_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    ).bind(tradingDay, title, url, kind, source, fullText, created),
   ];
   for (const [code, sentences] of confirmed) {
     const s = findStock(code)!;
@@ -274,6 +293,16 @@ async function handleResolve(request: Request, env: Env): Promise<Response> {
     .run();
   if (!res.meta.changes) return json({ error: "這些項目已經處理過了" }, 404);
   return json({ ok: true, stock });
+}
+
+// 每天排程跑一次：所屬交易日超過 180 天的圖片全文刪掉，標題、出處、擷取句都留著。
+// 用 trading_day 的索引找，不會掃整張表
+export async function pruneOldBodies(env: Env, nowMs = Date.now()): Promise<{ before: string; cleared: number }> {
+  const before = addDays(taipeiParts(nowMs).date, -BODY_KEEP_DAYS);
+  const res = await env.DB.prepare("UPDATE articles SET body = NULL WHERE trading_day < ? AND body IS NOT NULL")
+    .bind(before)
+    .run();
+  return { before, cleared: res.meta.changes };
 }
 
 // 對不到路徑就回傳 null，交給外層回 404

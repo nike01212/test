@@ -21,6 +21,10 @@
 	],
 	"observability": {
 		"enabled": true
+	},
+	"triggers": {
+		// 每天 UTC 19:00（台北 03:00）清掉超過 180 天的圖片全文（src/index.ts 的 scheduled）
+		"crons": ["0 19 * * *"]
 	}
 	// 群組密碼不放在這裡：用 `npx wrangler secret put GROUP_PASSWORD` 設定
 }
