@@ -1,4 +1,4 @@
-// 勾選和「已加入」只存在各人的瀏覽器（localStorage），不寫進資料庫，也不會跟到別台裝置。
+// 勾選、「已加入」和上傳的三竹清單只存在各人的瀏覽器（localStorage），不寫進資料庫，也不會跟到別台裝置。
 // 私密瀏覽、儲存空間被封鎖時讀寫都可能丟錯：這時改記在記憶體裡，頁面照常可用，只是重新整理後就不見了。
 
 const PREFIX = "dailynews:";
@@ -45,6 +45,15 @@ export function loadCodes(kind, isoDate) {
 
 export function saveCodes(kind, isoDate, codes) {
   write(`${kind}:${isoDate}`, codes.size ? JSON.stringify([...codes]) : null);
+}
+
+// 使用者上傳的三竹自選清單（export.js bytesToBinary 的字串），只記最後上傳的那一份，不分日期，也不會被 pruneOld 清掉
+export function loadMitakeList() {
+  return read("mitake-list");
+}
+
+export function saveMitakeList(list) {
+  write("mitake-list", list);
 }
 
 // 清掉太舊的日期，免得越存越多

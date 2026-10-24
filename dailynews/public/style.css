@@ -1047,6 +1047,31 @@ mark {
   gap: 8px;
 }
 
+/* 主清單多了元大、三竹共 6 顆：最多一排 3 顆（排成兩排整齊），每顆至少 120px，手機上一排 2 顆 */
+.export-actions.with-brokers {
+  grid-template-columns: repeat(auto-fit, minmax(max(120px, calc((100% - 16px) / 3)), 1fr));
+}
+
+/* 匯入三竹清單：提醒文字和按鈕 */
+.mitake-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 4px 0 14px;
+}
+
+.mitake-list p {
+  flex: 1 1 260px;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.mitake-list .file-button {
+  position: relative;
+  min-height: 44px;
+}
+
 .export-actions button {
   min-height: 44px;
   padding: 8px 12px;

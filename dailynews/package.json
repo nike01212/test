@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler d1 migrations apply DB --local && wrangler dev",
     "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "deploy:staging": "wrangler d1 migrations apply DB --env staging --remote && wrangler deploy --env staging",
     "types": "wrangler types",
     "check": "wrangler types && tsc --noEmit",
     "update-data": "node scripts/update-data.mjs",

@@ -34,6 +34,18 @@ function withSiteHeaders(res: Response): Response {
   return out;
 }
 
+// 測試站把左上角的網站名稱（index.html 的 .brand）換成 SITE_BRAND；正式站沒設這個值，原樣送出
+function withBrand(res: Response, brand: string | undefined): Response {
+  if (!brand || !res.headers.get("Content-Type")?.startsWith("text/html")) return res;
+  return new HTMLRewriter()
+    .on(".brand", {
+      element(el) {
+        el.setInnerContent(brand);
+      },
+    })
+    .transform(res);
+}
+
 function redirect(location: string): Response {
   return new Response(null, { status: 302, headers: { Location: location } });
 }
@@ -97,7 +109,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  return env.ASSETS.fetch(request);
+  return withBrand(await env.ASSETS.fetch(request), env.SITE_BRAND);
 }
 
 export default {

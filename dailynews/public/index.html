@@ -103,6 +103,14 @@
           <label><input type="radio" name="export-scope" value="picked" /><span>只匯出已勾選（<span id="scope-picked-count">0</span> 檔）</span></label>
         </fieldset>
         <div class="export-notes" id="export-notes"></div>
+        <div class="mitake-list">
+          <p id="mitake-note"></p>
+          <p class="bad" id="mitake-error" hidden>這不是三竹匯出的自選檔，請重新上傳正確的檔案。</p>
+          <label class="secondary file-button">
+            匯入三竹清單
+            <input type="file" id="mitake-file" accept=".csv,text/csv,text/plain" />
+          </label>
+        </div>
         <div class="export-groups" id="export-groups"></div>
       </section>
 

@@ -1,7 +1,20 @@
 import { buildMatcher, makeTitle } from "/matcher.js";
-import { codesText, csvText, GROUP_SIZE, splitGroups, watchGroups } from "/export.js";
+import {
+  binaryToBytes,
+  bytesToBinary,
+  codesText,
+  csvText,
+  dayLabel,
+  GROUP_SIZE,
+  mitakeFileName,
+  mitakeText,
+  parseMitakeList,
+  splitGroups,
+  watchGroups,
+  yuantaText,
+} from "/export.js";
 import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
-import { isPersistent, loadCodes, pruneOld, saveCodes } from "/marks.js";
+import { isPersistent, loadCodes, loadMitakeList, pruneOld, saveCodes, saveMitakeList } from "/marks.js";
 import { recognize } from "/ocr.js";
 import { extractUrl, splitPaste } from "/split.js";
 import { buildTagger, describeLabels } from "/tagger.js";
@@ -12,6 +25,7 @@ const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
 const MAX_SOURCE_SENTENCES = 2;
 const QUICK_HINT = "點代號可以複製";
 const COMPANY_LIST_REFRESH_DAYS = 183; // 國際大廠名單大約每半年照市值排名更新一次，超過就在網頁最下面提醒
+const MITAKE_MAX_BYTES = 100_000; // 三竹的自選清單只有幾百個位元組，比這大的一定不是
 
 const state = {
   date: null, // 目前看的那一天
@@ -26,6 +40,8 @@ const state = {
   picked: new Set(), // 這天勾選的代號（只存在這台裝置）
   added: new Set(), // 逐檔快速加入時標記「已加入」的代號（只存在這台裝置）
   exportScope: "all", // "all" 當天全部、"picked" 只匯出已勾選
+  mitakeList: loadMitakeList(), // 上傳的三竹自選清單（只存在這台裝置）；null 是還沒上傳
+  mitakeError: false, // 上傳的不是三竹匯出的自選檔
 };
 
 // 逐檔快速加入：目前在看哪一組、第幾檔（index 等於檔數代表看完了）
@@ -304,9 +320,11 @@ function render() {
   );
 
   $("article-count").textContent = data.articles.length;
+  // 這天貼入的資料：新貼的在最上面（10/24 發起人要求；伺服器給的是舊到新）
+  const newestFirst = [...data.articles].sort((a, b) => b.pasted_at - a.pasted_at || b.id - a.id);
   $("article-list").replaceChildren(
-    ...(data.articles.length
-      ? data.articles.map(renderArticle)
+    ...(newestFirst.length
+      ? newestFirst.map(renderArticle)
       : [h("li", { class: "muted" }, "還沒有貼入的資料。")]),
   );
 }
@@ -748,43 +766,85 @@ function renderExport() {
   $("pick-none").disabled = pickedCount === 0;
 
   const chosen = exportStocks();
-  const groups = chosen.length ? splitGroups(chosen, state.date) : [];
+  // 主清單的每一組另外有元大、三竹電腦版的匯入檔；三竹檔每 60 檔一個（1027-三竹-1.csv…）
+  const groups = (chosen.length ? splitGroups(chosen, state.date) : []).map((g, i, all) => ({
+    ...g,
+    mitakeFile: mitakeFileName(state.date, i, all.length),
+  }));
   const pendingCount = state.data.mentions.filter((m) => m.status === "pending").length;
   const notes = [];
   if (state.exportScope === "picked" && chosen.length === 0) {
     notes.push(h("p", { class: "warn" }, "還沒勾選任何個股。在下面的清單勾選要的個股，或改選「當天全部」。"));
   }
-  if (groups.length > 1) {
-    notes.push(
-      h(
-        "p",
-        {},
-        `超過 ${GROUP_SIZE} 檔（e點通每組最多 ${GROUP_SIZE} 檔），依被提到的則數由多到少拆成 ${groups.length} 組：`,
-        `${groups.map((g) => g.label).join("、")}，${groups[0].label} 是被提到最多的。`,
-      ),
-    );
-  }
+  // 文字照 10/24 發起人要求的寫法（拆組的規則寫在 README「分組」）
+  if (groups.length > 1) notes.push(h("p", {}, `超過 ${GROUP_SIZE} 檔，將分成多份檔案。`));
   if (pendingCount) notes.push(h("p", { class: "muted" }, `還有 ${pendingCount} 個待確認不會匯出，處理完才會算進來。`));
   if (!isPersistent()) {
-    notes.push(h("p", { class: "warn" }, "這個瀏覽器不能儲存勾選（可能是私密瀏覽），重新整理後勾選會不見。"));
+    notes.push(h("p", { class: "warn" }, "這個瀏覽器不能儲存資料（可能是私密瀏覽），重新整理後勾選和匯入的三竹清單會不見。"));
   }
   $("export-notes").replaceChildren(...notes);
+  renderMitakeList();
   $("export-groups").replaceChildren(...groups.map(renderGroup));
 }
 
+// 三竹匯入會把軟體裡的自選全部蓋掉：提醒可以先上傳原本的清單，新的個股放在 G1 這一列
+function renderMitakeList() {
+  const note = $("mitake-note");
+  note.className = state.mitakeList ? "muted" : "warn";
+  note.textContent = state.mitakeList
+    ? "已匯入三竹清單，新的個股會放在 G1 這一列，其他組照原本的清單。"
+    : "三竹匯入會覆蓋全部自選。如果要保留原本的清單，請先按「匯入三竹清單」上傳；新的個股會放在 G1 這一列。";
+  $("mitake-error").hidden = !state.mitakeError;
+}
+
+async function importMitakeList(input) {
+  const file = input.files[0];
+  input.value = ""; // 同一個檔再選一次也會觸發
+  if (!file) return;
+  const list = file.size <= MITAKE_MAX_BYTES ? bytesToBinary(new Uint8Array(await file.arrayBuffer())) : "";
+  state.mitakeError = !parseMitakeList(list);
+  if (state.mitakeError) {
+    toast("這不是三竹匯出的自選檔，請重新上傳正確的檔案。", "bad");
+  } else {
+    state.mitakeList = list;
+    saveMitakeList(list);
+    toast("已匯入三竹清單");
+  }
+  renderExport();
+}
+
 function renderGroup(g) {
+  const actions = [
+    h("button", { type: "button", class: "primary", onclick: () => copyCodes(g) }, "複製代號"),
+    h("button", { type: "button", class: "secondary", onclick: () => download(`${g.label}.txt`, `${codesText(g.stocks)}\n`, "text/plain") }, "下載 .txt"),
+    h("button", { type: "button", class: "secondary", onclick: () => download(`${g.label}.csv`, csvText(g.stocks), "text/csv") }, "下載 CSV"),
+  ];
+  // 主清單才有券商電腦版看盤軟體的匯入檔（延續性觀察那組沒有）；副檔名也是 .csv，檔名加券商免得和上面那個撞名
+  if (g.mitakeFile) {
+    actions.push(
+      h(
+        "button",
+        { type: "button", class: "secondary", title: "元大電腦版看盤匯入自選股用，匯入後是新的一組", onclick: () => download(`${g.label}-元大.csv`, yuantaText([g]), "text/csv") },
+        "下載元大檔",
+      ),
+      h(
+        "button",
+        {
+          type: "button",
+          class: "secondary",
+          title: "三竹電腦版匯入自選股用：匯入會覆蓋全部自選，這組放在 G1",
+          onclick: () => download(g.mitakeFile, binaryToBytes(mitakeText(g.stocks, dayLabel(state.date), state.mitakeList)), "text/csv"),
+        },
+        "下載三竹檔",
+      ),
+    );
+  }
+  actions.push(h("button", { type: "button", class: "secondary", onclick: () => openQuick(g) }, "逐檔加入"));
   return h(
     "div",
     { class: `export-group${g.watch ? " watch-group" : ""}` },
     h("p", { class: "group-head" }, h("strong", { class: "group-label" }, g.label), h("span", { class: "muted" }, ` ${g.stocks.length} 檔`)),
-    h(
-      "div",
-      { class: "export-actions" },
-      h("button", { type: "button", class: "primary", onclick: () => copyCodes(g) }, "複製代號"),
-      h("button", { type: "button", class: "secondary", onclick: () => download(`${g.label}.txt`, `${codesText(g.stocks)}\n`, "text/plain") }, "下載 .txt"),
-      h("button", { type: "button", class: "secondary", onclick: () => download(`${g.label}.csv`, csvText(g.stocks), "text/csv") }, "下載 CSV"),
-      h("button", { type: "button", class: "secondary", onclick: () => openQuick(g) }, "逐檔加入"),
-    ),
+    h("div", { class: `export-actions${g.mitakeFile ? " with-brokers" : ""}` }, ...actions),
   );
 }
 
@@ -840,8 +900,9 @@ async function copyCodes(g) {
   else toast("這個瀏覽器不能自動複製，請改用「下載 .txt」。", "bad");
 }
 
-function download(filename, text, type) {
-  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+// 字串存成 UTF-8；三竹檔是位元組（Uint8Array），照原樣存，上傳的清單是 Big5 也不會變
+function download(filename, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type: typeof content === "string" ? `${type};charset=utf-8` : type }));
   const link = h("a", { href: url, download: filename, hidden: true });
   document.body.append(link);
   link.click();
@@ -1815,6 +1876,7 @@ for (const radio of document.querySelectorAll('input[name="export-scope"]')) {
   });
 }
 $("pick-all").addEventListener("click", pickAll);
+$("mitake-file").addEventListener("change", (e) => importMitakeList(e.target));
 $("pick-none").addEventListener("click", pickNone);
 
 // 逐檔快速加入
@@ -1845,6 +1907,11 @@ $("quick").addEventListener("keydown", (e) => {
 
 // 同一個瀏覽器開了好幾個分頁時，跟著別的分頁的勾選更新
 window.addEventListener("storage", (e) => {
+  if (e.key === "dailynews:mitake-list") {
+    state.mitakeList = loadMitakeList();
+    if (state.data) renderExport();
+    return;
+  }
   if (!state.date || !e.key?.endsWith(`:${state.date}`)) return;
   state.picked = loadCodes("picked", state.date);
   state.added = loadCodes("added", state.date);
