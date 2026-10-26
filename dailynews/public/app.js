@@ -5,6 +5,8 @@ import {
   codesText,
   csvText,
   dayLabel,
+  fubonDsl,
+  fubonDslFileName,
   GROUP_SIZE,
   mitakeFileName,
   mitakeText,
@@ -797,7 +799,7 @@ function renderExport() {
   $("pick-none").disabled = pickedCount === 0;
 
   const chosen = exportStocks();
-  // 主清單的每一組另外有元大、三竹電腦版的匯入檔；三竹檔每 60 檔一個（1027-三竹-1.csv…）
+  // 主清單的每一組另外有元大、三竹、富邦 e01 電腦版的匯入檔；三竹檔每 60 檔一個（1027-三竹-1.csv…）
   const groups = (chosen.length ? splitGroups(chosen, state.date) : []).map((g, i, all) => ({
     ...g,
     mitakeFile: mitakeFileName(state.date, i, all.length),
@@ -867,6 +869,17 @@ function renderGroup(g) {
           onclick: () => download(g.mitakeFile, binaryToBytes(mitakeText(g.stocks, dayLabel(state.date), state.mitakeList)), "text/csv"),
         },
         "下載三竹檔",
+      ),
+      // 富邦 e01 的自選股匯出檔：組名是這組的名稱，每次下載都是新的 ID（匯入後加在最後面）
+      h(
+        "button",
+        {
+          type: "button",
+          class: "secondary",
+          title: "富邦 e01 匯入自選股用，匯入後最後面多一組，組名是這組的名稱",
+          onclick: () => download(fubonDslFileName(g.label), fubonDsl(g.stocks, g.label, crypto.randomUUID().toUpperCase()), "application/octet-stream"),
+        },
+        "下載富邦檔",
       ),
     );
   }

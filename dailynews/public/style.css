@@ -1098,9 +1098,9 @@ mark {
   gap: 8px;
 }
 
-/* 主清單多了元大、三竹共 6 顆：最多一排 3 顆（排成兩排整齊），每顆至少 120px，手機上一排 2 顆 */
+/* 主清單多了元大、三竹、富邦共 7 顆：最多一排 4 顆（排成 4＋3 兩排），每顆至少 120px，手機上一排 2 顆 */
 .export-actions.with-brokers {
-  grid-template-columns: repeat(auto-fit, minmax(max(120px, calc((100% - 16px) / 3)), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(max(120px, calc((100% - 24px) / 4)), 1fr));
 }
 
 /* 匯入三竹清單：提醒文字和按鈕 */

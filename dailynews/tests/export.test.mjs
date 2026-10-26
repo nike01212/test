@@ -6,6 +6,8 @@ import {
   codesText,
   csvText,
   dayLabel,
+  fubonDsl,
+  fubonDslFileName,
   GROUP_SIZE,
   mitakeFileName,
   mitakeText,
@@ -191,4 +193,64 @@ test("三竹電腦版的檔名：60 檔以內一個檔，超過就 -1、-2", () 
   assert.equal(mitakeFileName("2026-10-27", 0, 1), "1027-三竹.csv");
   assert.equal(mitakeFileName("2026-10-27", 0, 2), "1027-三竹-1.csv");
   assert.equal(mitakeFileName("2026-10-27", 1, 2), "1027-三竹-2.csv");
+});
+
+// 照 OLE 複合文件的規格把串流讀出來（只讀 mini stream 裡的，富邦檔都是小串流），用來檢查 fubonDsl 寫的檔
+function readOle(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u32 = (pos) => view.getUint32(pos, true);
+  const sec = (n) => 512 * (n + 1);
+  const fat = (n) => u32(sec(u32(0x4c)) + 4 * n);
+  const chain = (start, next) => {
+    const out = [];
+    for (let s = start; s < 0xfffffffa; s = next(s)) out.push(s);
+    return out;
+  };
+  const dirSecs = chain(u32(0x30), fat);
+  const miniFatSecs = chain(u32(0x3c), fat);
+  const miniFat = (n) => u32(sec(miniFatSecs[n >> 7]) + 4 * (n & 127));
+  const entryPos = (n) => sec(dirSecs[n >> 2]) + 128 * (n & 3);
+  const root = entryPos(0);
+  const miniSecs = chain(u32(root + 116), fat);
+  const miniByte = (offset) => bytes[sec(miniSecs[offset >> 9]) + (offset & 511)];
+  const streams = new Map();
+  const visit = (n) => {
+    if (n === 0xffffffff) return;
+    const pos = entryPos(n);
+    const name = String.fromCharCode(...new Uint16Array(bytes.slice(pos, pos + view.getUint16(pos + 64, true) - 2).buffer));
+    const size = u32(pos + 120);
+    const data = [];
+    for (const s of chain(u32(pos + 116), miniFat)) for (let k = 0; k < 64 && data.length < size; k++) data.push(miniByte(s * 64 + k));
+    streams.set(name, Uint8Array.from(data));
+    visit(u32(pos + 68));
+    visit(u32(pos + 72));
+  };
+  visit(u32(root + 76));
+  return streams;
+}
+
+test("富邦 e01 .dsl：OLE 複合文件，一組、組名和代號照順序，上櫃也是 .TW", () => {
+  const stocks = [
+    { code: "6488", name: "環球晶", market: "上櫃" },
+    { code: "2330", name: "台積電", market: "上市" },
+  ];
+  const id = "B98449A3-7606-4594-ACF8-F44D8008565C";
+  const out = fubonDsl(stocks, "1027-A", id);
+  assert.deepEqual([...out.subarray(0, 8)], [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  assert.equal(out.length, 2560); // 和 e01 匯出、只有一組的檔一樣大
+  const streams = readOle(out);
+  assert.deepEqual([...streams.keys()].sort(), ["FileContentSymbolList_0", "FileHeadFileCount", "_SSHeader_"]);
+  assert.equal(bytesToBinary(streams.get("FileContentSymbolList_0")), `1,${id};1027-A,6488.TW,2330.TW`);
+  assert.deepEqual([...streams.get("FileHeadFileCount")], [1, 0, 0, 0]);
+  assert.equal(bytesToBinary(streams.get("_SSHeader_")), `\0\0\0\0Test${"\0".repeat(28)}`);
+});
+
+test("富邦 e01 .dsl：60 檔、空的一組都寫得出來；組名不能有中文；檔名", () => {
+  const sixty = Array.from({ length: GROUP_SIZE }, (_, i) => ({ code: String(1101 + i), market: "上市" }));
+  const text = bytesToBinary(readOle(fubonDsl(sixty, "1027", "X")).get("FileContentSymbolList_0"));
+  assert.equal(text.split(",").length, 2 + GROUP_SIZE); // 「1」、「ID;組名」，接著 60 個代號
+  assert.ok(text.endsWith(",1160.TW"));
+  assert.equal(bytesToBinary(readOle(fubonDsl([], "1027", "X")).get("FileContentSymbolList_0")), "1,X;1027");
+  assert.throws(() => fubonDsl([], "1027-延續性觀察", "X"));
+  assert.equal(fubonDslFileName("1027-A"), "1027-A-富邦.dsl_DAQFAP");
 });
