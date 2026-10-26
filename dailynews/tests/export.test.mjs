@@ -251,6 +251,19 @@ test("富邦 e01 .dsl：60 檔、空的一組都寫得出來；組名不能有�
   assert.equal(text.split(",").length, 2 + GROUP_SIZE); // 「1」、「ID;組名」，接著 60 個代號
   assert.ok(text.endsWith(",1160.TW"));
   assert.equal(bytesToBinary(readOle(fubonDsl([], "1027", "X")).get("FileContentSymbolList_0")), "1,X;1027");
-  assert.throws(() => fubonDsl([], "1027-延續性觀察", "X"));
   assert.equal(fubonDslFileName("1027-A"), "1027-A-富邦.dsl_DAQFAP");
+});
+
+test("富邦 e01 .dsl：中文組名用 Big5 寫（延續性觀察那組）", () => {
+  const stocks = [{ code: "2330", market: "上市" }];
+  const text = readOle(fubonDsl(stocks, "1027-延續性觀察", "X")).get("FileContentSymbolList_0");
+  // 「延續性觀察」的 Big5：A9B5 C4F2 A9CA C65B B9EE
+  const big5 = [0xa9, 0xb5, 0xc4, 0xf2, 0xa9, 0xca, 0xc6, 0x5b, 0xb9, 0xee];
+  assert.deepEqual([...text], [...Buffer.from("1,X;1027-"), ...big5, ...Buffer.from(",2330.TW")]);
+  assert.equal(new TextDecoder("big5").decode(text), "1,X;1027-延續性觀察,2330.TW");
+  // e01 匯出檔裡的「自選一」也一樣（A6DB BFEF A440）
+  assert.deepEqual([...readOle(fubonDsl([], "自選一", "X")).get("FileContentSymbolList_0")].slice(4), [0xa6, 0xdb, 0xbf, 0xef, 0xa4, 0x40]);
+  // 十、卅有兩個碼，用 Windows（cp950）用的那個：A451、A4CA，不是部首區的 A2CC、A2CE
+  assert.deepEqual([...readOle(fubonDsl([], "十卅", "X")).get("FileContentSymbolList_0")].slice(4), [0xa4, 0x51, 0xa4, 0xca]);
+  assert.throws(() => fubonDsl([], "😀", "X"), /Big5/);
 });

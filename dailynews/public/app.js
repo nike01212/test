@@ -852,7 +852,7 @@ function renderGroup(g) {
     h("button", { type: "button", class: "secondary", onclick: () => download(`${g.label}.txt`, `${codesText(g.stocks)}\n`, "text/plain") }, "下載 .txt"),
     h("button", { type: "button", class: "secondary", onclick: () => download(`${g.label}.csv`, csvText(g.stocks), "text/csv") }, "下載 CSV"),
   ];
-  // 主清單才有券商電腦版看盤軟體的匯入檔（延續性觀察那組沒有）；副檔名也是 .csv，檔名加券商免得和上面那個撞名
+  // 元大、三竹的匯入檔只有主清單（延續性觀察那組沒有）；副檔名也是 .csv，檔名加券商免得和上面那個撞名
   if (g.mitakeFile) {
     actions.push(
       h(
@@ -870,20 +870,23 @@ function renderGroup(g) {
         },
         "下載三竹檔",
       ),
-      // 富邦 e01 的自選股匯出檔：組名是這組的名稱，每次下載都是新的 ID（匯入後加在最後面）
-      h(
-        "button",
-        {
-          type: "button",
-          class: "secondary",
-          title: "富邦 e01 匯入自選股用，匯入後最後面多一組，組名是這組的名稱",
-          onclick: () => download(fubonDslFileName(g.label), fubonDsl(g.stocks, g.label, crypto.randomUUID().toUpperCase()), "application/octet-stream"),
-        },
-        "下載富邦檔",
-      ),
     );
   }
-  actions.push(h("button", { type: "button", class: "secondary", onclick: () => openQuick(g) }, "逐檔加入"));
+  // 富邦 e01 的自選股匯出檔：主清單和延續性觀察都有（10/26 發起人要求）。
+  // 組名是這組的名稱，每次下載都是新的 ID（匯入後加在最後面）
+  actions.push(
+    h(
+      "button",
+      {
+        type: "button",
+        class: "secondary",
+        title: "富邦 e01 匯入自選股用，匯入後最後面多一組，組名是這組的名稱",
+        onclick: () => download(fubonDslFileName(g.label), fubonDsl(g.stocks, g.label, crypto.randomUUID().toUpperCase()), "application/octet-stream"),
+      },
+      "下載富邦檔",
+    ),
+    h("button", { type: "button", class: "secondary", onclick: () => openQuick(g) }, "逐檔加入"),
+  );
   return h(
     "div",
     { class: `export-group${g.watch ? " watch-group" : ""}` },

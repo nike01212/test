@@ -120,17 +120,45 @@ function fubonCode(s) {
 // FileContentSymbolList_0、_1…（一組一個，Big5 文字「1,組的 ID;組名,2330.TW,…」）。
 // 匯入規則（10/26 實測）：ID 已經有的組整組略過，新的 ID 才加成一組，一定加在最後面；組名和個股順序照檔案。
 // 所以一個檔只放一組、每次用新的 ID（id 由呼叫的人給，網頁用 crypto.randomUUID）。
-// 組名只能是英數字（網頁上是 1027、1027-A），瀏覽器沒有 Big5 編碼器，中文會寫不進去
+// 組名用 Big5 寫（1027、1027-A、1027-延續性觀察；10/26 實測中文組名正常）
 export function fubonDsl(stocks, name, id) {
   const line = [`1,${id};${name}`, ...stocks.map(fubonCode)].join(",");
-  if (/[^\x20-\x7e]/.test(line)) throw new Error("富邦 .dsl 的組名只能是英數字");
   const header = new Uint8Array(36);
   header.set([0x54, 0x65, 0x73, 0x74], 4); // "Test"，照匯出檔原樣
   return oleFile([
     ["_SSHeader_", header],
     ["FileHeadFileCount", Uint8Array.of(1, 0, 0, 0)],
-    ["FileContentSymbolList_0", binaryToBytes(line)],
+    ["FileContentSymbolList_0", big5Bytes(line)],
   ]);
+}
+
+// 瀏覽器的 TextEncoder 只會 UTF-8，Big5 的編碼表用 TextDecoder("big5") 把每個雙位元組碼解一次反推出來（第一次用到才建）。
+// 只用標準 Big5 的範圍（第一個位元組 A1～F9）。同一個字有兩個碼時用前面那個，只有十、卅用後面那個
+// （前面那個是部首區的碼）。10/26 和 Windows 的 cp950（Big5／ANSI）逐字比過，中文字全部一樣
+const BIG5_USE_LAST = new Set(["十", "卅"]);
+let big5Table = null;
+
+function big5Bytes(text) {
+  if (!big5Table) {
+    big5Table = new Map();
+    const decoder = new TextDecoder("big5");
+    for (let lead = 0xa1; lead <= 0xf9; lead++) {
+      for (let trail = 0x40; trail <= 0xfe; trail++) {
+        if (trail > 0x7e && trail < 0xa1) continue; // 第二個位元組是 40～7E、A1～FE
+        const char = decoder.decode(Uint8Array.of(lead, trail));
+        if (char.length !== 1 || char === "�") continue;
+        if (!big5Table.has(char) || BIG5_USE_LAST.has(char)) big5Table.set(char, [lead, trail]);
+      }
+    }
+  }
+  const out = [];
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code < 0x80) out.push(code);
+    else if (big5Table.has(char)) out.push(...big5Table.get(char));
+    else throw new Error(`「${char}」不能用 Big5 寫`);
+  }
+  return Uint8Array.from(out);
 }
 
 export function fubonDslFileName(label) {
