@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { buildMatcher, normalize } from "../public/matcher.js";
+import { applyAnswers, buildMatcher, normalize, pendingKey } from "../public/matcher.js";
 
 const load = async (name) => JSON.parse(await readFile(new URL(`../public/data/${name}`, import.meta.url), "utf8"));
 const matcher = buildMatcher(await load("stocks.json"), await load("name-rules.json"));
@@ -141,4 +141,52 @@ test("「事業強勁」「產業旺季」裡的字不是業強、業旺", () =>
   // 真的在講業強、業旺時照樣對得到
   assert.deepEqual(okCodes(matcher.analyze("業強(6124)營收強勁")), ["6124"]);
   assert.deepEqual(okCodes(matcher.analyze("業強今年營收創新高，業旺接單暢旺")).sort(), ["1475", "6124"]);
+});
+
+test("併進別家的公司：「矽品」算成 3711 日月光投控，句子裡寫矽品的會標出來", () => {
+  const r = matcher.analyze("欣興、京元電子、矽品被點名！輝達揭AI擴產藍圖\n日月光投控今天法說會");
+  assert.deepEqual(okCodes(r), ["3037", "2449", "3711"]);
+  const m = r.mentions.find((x) => x.code === "3711");
+  assert.deepEqual(matcher.formerNames("3711", m.sentences), ["矽品"]);
+  // 只寫日月光投控、或別檔，都不標
+  assert.deepEqual(matcher.formerNames("3711", ["日月光投控今天法說會"]), []);
+  assert.deepEqual(matcher.formerNames("3037", m.sentences), []);
+  // 待確認改代號、延續性觀察手動加，打「矽品」也搜得到
+  assert.equal(matcher.search("矽品")[0].code, "3711");
+});
+
+test("name-rules.json 的 merged：代號都在上市櫃清單裡，舊名稱不是現在上市櫃的名稱", async () => {
+  const rules = await load("name-rules.json");
+  const stocks = await load("stocks.json");
+  const names = new Set(stocks.stocks.map(([, name]) => name));
+  for (const [name, code] of Object.entries(rules.merged ?? {})) {
+    assert.ok(matcher.stock(code), `merged 的「${name}」對到的 ${code} 不在上市櫃清單裡`);
+    assert.ok(!names.has(name), `merged 的「${name}」現在還是上市櫃的名稱`);
+  }
+});
+
+test("預覽裡回答待確認：是某一檔就變成對上的個股，不是個股就拿掉，沒回答的照舊", () => {
+  const { mentions } = matcher.analyze("三星與台積電(2330)合作\n台積電擴產");
+  const pending = mentions.find((m) => m.status === "pending");
+  assert.equal(pending.raw, "三星");
+  assert.deepEqual(pending.candidates, ["5007"]);
+  const key = pendingKey(pending);
+  const codesOf = (list) => list.map((m) => (m.status === "ok" ? m.code : `待確認:${m.raw}`));
+
+  assert.deepEqual(codesOf(applyAnswers(mentions, new Map())), ["2330", "待確認:三星"]);
+  assert.deepEqual(codesOf(applyAnswers(mentions, new Map([[key, "5007"]]))), ["2330", "5007"]);
+  assert.deepEqual(codesOf(applyAnswers(mentions, new Map([[key, null]]))), ["2330"]);
+  // 改成已經對上的那一檔：不會多一列，句子併進去（每檔最多 2 句）
+  const merged = applyAnswers(mentions, new Map([[key, "2330"]]));
+  assert.deepEqual(codesOf(merged), ["2330"]);
+  assert.ok(merged[0].sentences.length <= 2);
+  assert.ok(merged[0].spans.length > mentions[0].spans.length);
+  // 原本的陣列不會被改到
+  assert.deepEqual(codesOf(mentions), ["2330", "待確認:三星"]);
+});
+
+test("「三星電機」是韓國公司，不問是不是 5007 三星", () => {
+  const r = matcher.analyze("供應商包括日本挹斐電(Ibiden)、三星電機及欣興等業者。");
+  assert.deepEqual(okCodes(r), ["3037"]);
+  assert.equal(pendings(r).length, 0);
 });

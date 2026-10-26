@@ -458,7 +458,8 @@ button:disabled {
 }
 
 .preview-item.skip,
-.preview-item.none {
+.preview-item.none,
+.preview-item.emptied {
   opacity: 0.75;
 }
 
@@ -662,6 +663,49 @@ button:disabled {
 .pending-chip {
   border-style: dashed;
   color: var(--warn);
+}
+
+/* 預覽的待確認可以點開回答；手機上要好按 */
+button.pending-chip {
+  min-height: 32px;
+  background: var(--warn-bg);
+  border-color: var(--warn);
+  font-size: inherit;
+}
+
+.preview-pending {
+  margin-top: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: var(--warn-bg);
+}
+
+.preview-pending .pending-actions {
+  margin: 8px 0;
+}
+
+/* 網址類的個股可以按「×」拿掉；手機上要好按，按鈕做成 32 像素見方 */
+.chip.removable {
+  display: inline-flex;
+  align-items: center;
+  padding-right: 0;
+}
+
+.chip-remove {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.chip-remove:hover {
+  color: var(--error);
 }
 
 .preview-foot {
@@ -902,6 +946,13 @@ mark {
 .tag.added {
   color: var(--ok);
   border-color: var(--ok);
+}
+
+/* 新聞寫的是已經併進這檔的舊公司（矽品 → 日月光投控） */
+.tag.former {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: var(--warn-bg);
 }
 
 /* 連續被提到 */

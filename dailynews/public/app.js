@@ -1,4 +1,4 @@
-import { buildMatcher, makeTitle } from "/matcher.js";
+import { applyAnswers, buildMatcher, makeTitle, pendingKey, withoutCodes } from "/matcher.js";
 import {
   binaryToBytes,
   bytesToBinary,
@@ -17,7 +17,7 @@ import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
 import { isPersistent, loadCodes, loadMitakeList, pruneOld, saveCodes, saveMitakeList } from "/marks.js";
 import { recognize } from "/ocr.js";
 import { extractUrl, splitPaste } from "/split.js";
-import { buildTagger, describeLabels } from "/tagger.js";
+import { buildTagger, describeLabels, mergeChange } from "/tagger.js";
 import { uncheckedCount, watchItems } from "/watch.js";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
@@ -163,6 +163,28 @@ function highlight(sentence, code, extra = []) {
 function stockLabel(code) {
   const s = state.matcher?.stock(code);
   return s ? `${s.code} ${s.name}` : code;
+}
+
+// 新聞寫的是已經併進這檔的舊公司（name-rules.json 的 merged，例如矽品 → 日月光投控）
+function formerNamesOf(code, sentences) {
+  return state.matcher?.formerNames(code, sentences) ?? [];
+}
+
+// 預覽：「3711 日月光投控（矽品）」
+function formerNote(code, sentences) {
+  const names = formerNamesOf(code, sentences);
+  return names.length ? `（${names.join("、")}）` : "";
+}
+
+// 清單：名稱旁邊標「新聞寫「矽品」」（2026/10/26 發起人選的樣式）
+function formerTag(s) {
+  const names = formerNamesOf(s.code, s.rows.flatMap((m) => m.sentences));
+  if (!names.length) return null;
+  return h(
+    "span",
+    { class: "tag former", title: `${names.join("、")}已經併入${s.name}，這裡算成 ${s.code}` },
+    `新聞寫「${names.join("」「")}」`,
+  );
 }
 
 // 輸入代號或名稱，跳出候選清單
@@ -383,6 +405,7 @@ function renderStock(s) {
       h("span", { class: "code" }, s.code),
       h("span", { class: "name" }, s.name),
       h("span", { class: "tag" }, s.market),
+      formerTag(s),
       // 「手動新增個股」10/23 拿掉了（漏掉的在預覽裡補），之前手動加的還會顯示「手動新增」
       h("span", { class: "count" }, count ? `${count} 則` : "手動新增"),
       streakTag(s.code),
@@ -592,16 +615,18 @@ const CUSTOM_TAG_LENGTH = 20;
 const CUSTOM_PARTNER_LENGTH = 40;
 const tidyLabel = (text) => text.replace(/\s+/g, " ").trim();
 
+// 標籤編輯區：清單上的一檔、預覽的一則共用。ctx 是：
+//   edit（正在改的 { base, tags, partners }）、key（表單名稱用）、who（給讀螢幕軟體的說明，例如「3711 日月光投控」）、
+//   redraw()（重畫編輯區，回傳它所在的卡片）、help、saveText、onSave、onCancel
+
 // 加完一個之後重畫編輯區，游標放回原本的輸入框，可以接著加下一個
-function addToDraft(s, input, set, value, selector) {
+function addToDraft(ctx, set, value, selector) {
   set.add(value);
-  const card = input.closest(".stock");
-  redrawLabels(s, card);
-  card?.querySelector(selector)?.focus();
+  ctx.redraw()?.querySelector(selector)?.focus();
 }
 
-// 自己填標籤：設定檔裡沒有的也可以加，只加在這一檔
-function customTagInput(s, edit) {
+// 自己填標籤：設定檔裡沒有的也可以加，只加在這裡
+function customTagInput(ctx) {
   const input = h("input", {
     type: "text",
     class: "custom-tag",
@@ -609,11 +634,11 @@ function customTagInput(s, edit) {
     maxlength: CUSTOM_TAG_LENGTH,
     enterkeyhint: "done",
     autocomplete: "off",
-    "aria-label": `幫 ${s.code} ${s.name} 自己填標籤`,
+    "aria-label": `幫 ${ctx.who} 自己填標籤`,
   });
   const add = () => {
     const name = tidyLabel(input.value);
-    if (name) addToDraft(s, input, edit.tags, name, ".custom-tag");
+    if (name) addToDraft(ctx, ctx.edit.tags, name, ".custom-tag");
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -625,7 +650,8 @@ function customTagInput(s, edit) {
 }
 
 // 加合作對象：搜尋大廠名單（中英文、別名、代號都可以），名單裡沒有的就照打的字加
-function partnerSearch(s, edit) {
+function partnerSearch(ctx) {
+  const edit = ctx.edit;
   const input = h("input", {
     type: "search",
     class: "partner-search",
@@ -633,11 +659,11 @@ function partnerSearch(s, edit) {
     maxlength: CUSTOM_PARTNER_LENGTH,
     enterkeyhint: "done",
     autocomplete: "off",
-    "aria-label": `幫 ${s.code} ${s.name} 加合作對象`,
+    "aria-label": `幫 ${ctx.who} 加合作對象`,
   });
   const list = h("ul", { class: "suggestions", hidden: true });
   let options = [];
-  const add = (label) => addToDraft(s, input, edit.partners, label, ".partner-search");
+  const add = (label) => addToDraft(ctx, edit.partners, label, ".partner-search");
 
   function update() {
     const text = tidyLabel(input.value);
@@ -668,57 +694,62 @@ function partnerSearch(s, edit) {
   return h("div", { class: "picker partner-picker" }, input, list);
 }
 
-function renderLabelEditor(s) {
-  const edit = state.labelEdit;
+function labelEditor(ctx) {
+  const edit = ctx.edit;
   const tagger = state.tagger || null;
   // 設定檔裡的標籤，加上已經存下來、但設定檔裡沒有的（改名、刪掉或自己填的），才拿得掉
   const tagNames = [...new Set([...(tagger?.tagNames ?? []), ...edit.base.tags, ...edit.tags])];
   const partnerList = [...edit.base.partners, ...edit.partners];
   const partnerNames = tagger ? tagger.sortPartners(partnerList) : [...new Set(partnerList)];
-  const editor = h(
+  return h(
     "div",
     { class: "label-editor" },
     h(
       "fieldset",
       {},
       h("legend", {}, "標籤"),
-      tagNames.map((t) => labelOption(edit.tags, t, `tags-${s.code}`)),
+      tagNames.map((t) => labelOption(edit.tags, t, `tags-${ctx.key}`)),
       state.tagger === null ? h("span", { class: "muted" }, "標籤設定載入中…") : null,
       state.tagger === false ? h("span", { class: "warn" }, "標籤設定讀取失敗（public/data/tags.json）") : null,
-      customTagInput(s, edit),
+      customTagInput(ctx),
     ),
     h(
       "fieldset",
       {},
       h("legend", {}, "合作對象"),
-      partnerNames.map((p) => labelOption(edit.partners, p, `partners-${s.code}`)),
-      partnerSearch(s, edit),
+      partnerNames.map((p) => labelOption(edit.partners, p, `partners-${ctx.key}`)),
+      partnerSearch(ctx),
     ),
-    h(
-      "p",
-      { class: "muted label-help" },
-      "改的是這一天的這一檔，提到它的每一則都會一起改。自己填的只加在這裡；想讓以後的新聞自動判斷，要請發起人加進設定檔。",
-    ),
+    h("p", { class: "muted label-help" }, ctx.help),
     h(
       "div",
       { class: "label-actions" },
-      h("button", { type: "button", class: "primary", disabled: edit.saving, onclick: () => saveLabelEdit(s) }, edit.saving ? "儲存中…" : "儲存"),
-      h(
-        "button",
-        {
-          type: "button",
-          class: "secondary",
-          onclick: (e) => {
-            const card = e.target.closest(".stock");
-            state.labelEdit = null;
-            redrawLabels(s, card);
-          },
-        },
-        "取消",
-      ),
+      h("button", { type: "button", class: "primary", disabled: edit.saving, onclick: ctx.onSave }, ctx.saveText),
+      h("button", { type: "button", class: "secondary", onclick: ctx.onCancel }, "取消"),
     ),
   );
-  return editor;
+}
+
+function renderLabelEditor(s) {
+  const edit = state.labelEdit;
+  const card = () => $("stock-list").querySelector(`[data-code="${s.code}"]`);
+  return labelEditor({
+    edit,
+    key: s.code,
+    who: `${s.code} ${s.name}`,
+    redraw: () => {
+      const c = card();
+      redrawLabels(s, c);
+      return c;
+    },
+    help: "改的是這一天的這一檔，提到它的每一則都會一起改。自己填的只加在這裡；想讓以後的新聞自動判斷，要請發起人加進設定檔。",
+    saveText: edit.saving ? "儲存中…" : "儲存",
+    onSave: () => saveLabelEdit(s),
+    onCancel: () => {
+      state.labelEdit = null;
+      redrawLabels(s, card());
+    },
+  });
 }
 
 async function saveLabelEdit(s) {
@@ -1070,6 +1101,11 @@ function newItem(fields) {
     images: [], // 圖片的暫時網址（只在這個分頁）
     headline: "", // 圖片的標題（辨識時找最大的字，可以修改），送出時當成這則的標題
     source: "", // 圖片的出處（標題上面那行，通常是版名和日期），送出時存起來
+    removed: new Set(), // 按「×」拿掉的個股代號（只有網址類可以拿掉，不能復原）
+    answers: new Map(), // 預覽裡回答的待確認：pendingKey → 代號，null 是「不是個股」
+    openPending: null, // 展開選項的那個待確認（pendingKey）
+    labelChange: null, // 預覽裡改的標籤、合作對象：{ tags: { add, remove }, partners: { add, remove } }，套到這一則的每一檔
+    labelEdit: null, // 正在改標籤：{ base, tags: Set, partners: Set }
     error: "",
     ...fields,
   };
@@ -1114,7 +1150,8 @@ function isBusy(item) {
   return (item.type === "url" && item.fetch.status === "loading") || item.ocr?.status === "loading";
 }
 
-// 每一則現在能不能送出：ready 可以、busy 處理中、blocked 要補內容、none 沒有個股、skip 重複
+// 每一則現在能不能送出：ready 可以、busy 處理中、blocked 要補內容、none 沒有個股、
+// emptied 個股都拿掉了、editing 標籤還沒改完、skip 重複
 function itemState(item) {
   if (isBusy(item)) return { kind: "busy", message: "" };
   if (item.type === "url") {
@@ -1132,13 +1169,26 @@ function itemState(item) {
   if (!state.matcher) return { kind: "busy", message: "代號清單載入中…" };
   // 標籤要在送出前判斷好（不存全文，送出後不能重算），所以等設定檔讀完；讀取失敗就照樣送出、不貼標籤
   if (state.tagger === null) return { kind: "busy", message: "標籤設定載入中…" };
-  if (item.cache?.content !== content || item.cache.tagger !== state.tagger) {
+  const edits = JSON.stringify([[...item.removed], [...item.answers], item.labelChange]);
+  if (item.cache?.content !== content || item.cache.tagger !== state.tagger || item.cache.edits !== edits) {
     const analysis = state.matcher.analyze(content);
-    if (state.tagger) analysis.mentions = state.tagger.tagMentions(content, analysis.mentions);
-    item.cache = { content, tagger: state.tagger, analysis };
+    const found = analysis.mentions.length;
+    // 回答的待確認、拿掉的個股都在貼標籤之前處理，標籤和合作對象照結果重算（2026/10/26 發起人決定）
+    analysis.mentions = withoutCodes(applyAnswers(analysis.mentions, item.answers), item.removed);
+    if (state.tagger) {
+      analysis.mentions = state.tagger.tagMentions(content, analysis.mentions);
+      if (item.labelChange) analysis.mentions = state.tagger.applyChange(analysis.mentions, item.labelChange);
+    }
+    item.cache = { content, tagger: state.tagger, edits, found, analysis };
   }
-  const { analysis } = item.cache;
-  if (analysis.mentions.length === 0) return { kind: "none", message: "沒有找到個股，送出時會略過。" };
+  const { analysis, found } = item.cache;
+  if (analysis.mentions.length === 0) {
+    // 全部拿掉的留在預覽裡，不送出也不自動清掉（2026/10/26 發起人決定）
+    if (found) return { kind: "emptied", message: "個股都拿掉了，這則不會送出。不要的話按這則的「刪除」。" };
+    return { kind: "none", message: "沒有找到個股，送出時會略過。" };
+  }
+  // 改標籤改到一半先不送，免得勾好的沒有按「完成」就送出去
+  if (item.labelEdit) return { kind: "editing", analysis };
   return { kind: "ready", analysis };
 }
 
@@ -1187,6 +1237,8 @@ function renderPreviewFooter() {
   if (busy) parts.push(`${busy} 則還在處理`);
   if (count("blocked")) parts.push(`${count("blocked")} 則要補內容`);
   if (count("none")) parts.push(`${count("none")} 則沒有個股`);
+  if (count("emptied")) parts.push(`${count("emptied")} 則個股都拿掉了`);
+  if (count("editing")) parts.push(`${count("editing")} 則標籤還沒按「完成」`);
   if (count("skip")) parts.push(`${count("skip")} 則重複`);
   $("preview-summary").textContent = parts.join("・");
   // 只剩重複、沒有個股的，按下去就是把它們清掉
@@ -1198,7 +1250,9 @@ function renderPreviewFooter() {
       ? "處理完才能送出"
       : ready
         ? `送出 ${ready} 則`
-        : `略過 ${droppable} 則`;
+        : droppable
+          ? `略過 ${droppable} 則`
+          : "沒有可以送出的";
   button.disabled = preview.submitting || busy > 0 || ready + droppable === 0;
 }
 
@@ -1334,29 +1388,95 @@ function imageBody(item) {
   ];
 }
 
+// 找到的個股，加上展開的待確認選項（打字時只重畫這一塊）
 function foundLine(item, st) {
+  return h("div", { class: "found-block" }, foundChips(item, st), st.analysis ? pendingPanel(item, st.analysis) : null);
+}
+
+function foundChips(item, st) {
   if (st.kind === "busy") return h("p", { class: "found muted" }, st.message);
-  if (st.kind !== "ready") {
-    const kind = { none: "warn", skip: "muted", blocked: "bad" }[st.kind];
+  if (!st.analysis) {
+    const kind = { none: "warn", emptied: "warn", skip: "muted", blocked: "bad" }[st.kind];
     return h("p", { class: `found ${kind}` }, st.message);
   }
   const ok = st.analysis.mentions.filter((m) => m.status === "ok");
   const pending = st.analysis.mentions.filter((m) => m.status === "pending");
   // 每檔的標籤放在提示文字裡（提到好幾檔時，每檔只看提到它的段落，可能不一樣）
   const labelsOf = (m) => describeLabels(m) || undefined;
+  // 網址類的內文不能改，抓錯的個股按「×」拿掉（文字、圖片類可以直接改字）
+  const removeButton = (code) =>
+    h(
+      "button",
+      {
+        type: "button",
+        class: "chip-remove",
+        "aria-label": `拿掉 ${stockLabel(code)}`,
+        title: "抓錯了，拿掉這檔（不會送出，不能復原）",
+        onclick: () => removeStock(item, code),
+      },
+      "×",
+    );
+  const removable = item.type === "url";
+  // 待確認點了展開選項，送出前就能回答（2026/10/26 發起人要求）；不回答照舊送出、到清單上再確認
+  const pendingButton = (m) => {
+    const key = pendingKey(m);
+    const open = item.openPending === key;
+    return h(
+      "button",
+      {
+        type: "button",
+        class: "chip pending-chip",
+        "data-key": key,
+        "aria-expanded": String(open),
+        title: [m.reason, labelsOf(m)].filter(Boolean).join("\n"),
+        onclick: () => togglePending(item, key),
+      },
+      `${open ? "▾" : "▸"} 待確認：${m.raw}`,
+    );
+  };
   return h(
     "p",
     { class: "found" },
     h("span", { class: "muted" }, `找到 ${ok.length} 檔${pending.length ? `、${pending.length} 個待確認` : ""}：`),
-    ok.map((m) => h("span", { class: "chip", title: labelsOf(m) }, stockLabel(m.code))),
-    pending.map((m) => h("span", { class: "chip pending-chip", title: [m.reason, labelsOf(m)].filter(Boolean).join("\n") }, `待確認：${m.raw}`)),
+    ok.map((m) =>
+      h(
+        "span",
+        { class: removable ? "chip removable" : "chip", title: labelsOf(m) },
+        stockLabel(m.code) + formerNote(m.code, m.sentences),
+        removable ? removeButton(m.code) : null,
+      ),
+    ),
+    pending.map(pendingButton),
   );
 }
 
-// 預覽上的標籤和合作對象（這一則所有個股合起來）
-function labelLine(st) {
-  if (st.kind !== "ready") return h("p", { class: "found-labels", hidden: true });
+// 展開的待確認：和清單上「待確認」一樣的選項
+function pendingPanel(item, analysis) {
+  const m = analysis.mentions.find((x) => x.status === "pending" && pendingKey(x) === item.openPending);
+  if (!m) return null;
+  const key = pendingKey(m);
+  return h(
+    "div",
+    { class: "preview-pending" },
+    h("p", { class: "pending-reason" }, m.reason),
+    m.sentences.map((t) => h("blockquote", {}, highlight(t, null, [m.raw]))),
+    h(
+      "div",
+      { class: "pending-actions" },
+      m.candidates.map((code) =>
+        h("button", { type: "button", class: "choice", onclick: () => answerPending(item, key, code) }, `是 ${stockLabel(code)}`),
+      ),
+      h("button", { type: "button", class: "secondary", onclick: () => answerPending(item, key, null) }, "不是個股"),
+    ),
+    stockPicker({ placeholder: "改成其他個股：輸入代號或名稱", onPick: (s) => answerPending(item, key, s.code) }),
+  );
+}
+
+// 預覽上的標籤和合作對象（這一則所有個股合起來），可以按「改標籤」改這一則的每一檔
+function labelLine(item, st) {
+  if (!st.analysis) return h("p", { class: "found-labels", hidden: true });
   if (state.tagger === false) return h("p", { class: "found-labels warn" }, "標籤設定讀取失敗，這則送出時不會有標籤和合作對象。");
+  if (item.labelEdit) return previewLabelEditor(item);
   const mentions = st.analysis.mentions;
   const { tags, partners } = state.tagger.union(mentions);
   const key = (m) => `${m.tags.join()}|${m.partners.join()}`;
@@ -1369,7 +1489,33 @@ function labelLine(st) {
     h("span", { class: "muted" }, "合作對象："),
     partners.length ? h("span", {}, partners.join("、")) : h("span", { class: "muted" }, "沒有"),
     differs ? h("span", { class: "muted" }, "（每檔只看提到它的段落，各檔不一樣，送出後在清單上看）") : null,
+    h(
+      "button",
+      {
+        type: "button",
+        class: "link-button small",
+        "aria-label": `改「${itemTitle(item)}」的標籤和合作對象`,
+        onclick: () => openPreviewLabelEdit(item),
+      },
+      "改標籤",
+    ),
   );
+}
+
+function previewLabelEditor(item) {
+  return labelEditor({
+    edit: item.labelEdit,
+    key: `item-${item.id}`,
+    who: `「${itemTitle(item)}」`,
+    redraw: () => updateItemInfo(item),
+    help: "改的是這一則的每一檔：勾掉的從每一檔拿掉，加的每一檔都加上，沒動的照原本（各檔可能不一樣）。按「完成」才會套用，送出時一起存。自己填的只加在這一則；想讓以後的新聞自動判斷，要請發起人加進設定檔。",
+    saveText: "完成",
+    onSave: () => finishPreviewLabelEdit(item),
+    onCancel: () => {
+      item.labelEdit = null;
+      updateItemInfo(item);
+    },
+  });
 }
 
 function renderItem(item, index) {
@@ -1410,7 +1556,7 @@ function renderItem(item, index) {
     item.type === "image" ? fieldBox(item, index, "source", "出處", "例如：B3 上市櫃 | 2026.10.22 | 工商時報") : null,
     item.type !== "url" ? textBox(item, index, item.type === "image" ? "辨識出來的文字" : "這則的內容") : null,
     foundLine(item, st),
-    labelLine(st),
+    labelLine(item, st),
     item.error ? h("p", { class: "bad item-error" }, item.error) : null,
   );
 }
@@ -1419,21 +1565,61 @@ function renderItem(item, index) {
 const infoTimers = new Map();
 function scheduleItemInfo(item) {
   clearTimeout(infoTimers.get(item.id));
-  infoTimers.set(
-    item.id,
-    setTimeout(() => {
-      const card = $("preview-list").querySelector(`[data-item="${item.id}"]`);
-      if (!card) return;
-      const st = itemState(item);
-      card.className = `preview-item ${st.kind}`;
-      card.querySelector(".item-title").textContent = itemTitle(item);
-      card.querySelector(".found").replaceWith(foundLine(item, st));
-      card.querySelector(".found-labels").replaceWith(labelLine(st));
-      const urlOption = card.querySelector('.type-select option[value="url"]');
-      if (urlOption && item.type !== "url") urlOption.disabled = !extractUrl(item.text);
-      renderPreviewFooter();
-    }, 300),
-  );
+  infoTimers.set(item.id, setTimeout(() => updateItemInfo(item), 300));
+}
+
+function updateItemInfo(item) {
+  const card = $("preview-list").querySelector(`[data-item="${item.id}"]`);
+  if (!card) return null;
+  const st = itemState(item);
+  card.className = `preview-item ${st.kind}`;
+  card.querySelector(".item-title").textContent = itemTitle(item);
+  card.querySelector(".found-block").replaceWith(foundLine(item, st));
+  card.querySelector(".found-labels, .label-editor").replaceWith(labelLine(item, st));
+  const urlOption = card.querySelector('.type-select option[value="url"]');
+  if (urlOption && item.type !== "url") urlOption.disabled = !extractUrl(item.text);
+  renderPreviewFooter();
+  return card;
+}
+
+// 回答待確認：是某一檔就變成對上的個股，不是個股就拿掉（跟「×」一樣不能復原）
+function answerPending(item, key, code) {
+  item.answers.set(key, code);
+  item.openPending = null;
+  updateItemInfo(item);
+}
+
+function togglePending(item, key) {
+  item.openPending = item.openPending === key ? null : key;
+  const card = updateItemInfo(item);
+  // 整塊重畫過，焦點放回同一個待確認，用鍵盤操作的人才不會跳掉
+  card?.querySelector(`.pending-chip[data-key="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+}
+
+function openPreviewLabelEdit(item) {
+  const { tags, partners } = state.tagger.union(itemState(item).analysis.mentions);
+  item.labelEdit = { base: { tags, partners }, tags: new Set(tags), partners: new Set(partners) };
+  updateItemInfo(item)?.querySelector(".label-editor input")?.focus();
+}
+
+// 這次勾的和之前改過的合在一起，之後重新比對（改字、重新抓取）也照樣套上
+function finishPreviewLabelEdit(item) {
+  const edit = item.labelEdit;
+  item.labelChange = {
+    tags: mergeChange(item.labelChange?.tags, edit.tags, edit.base.tags),
+    partners: mergeChange(item.labelChange?.partners, edit.partners, edit.base.partners),
+  };
+  item.labelEdit = null;
+  updateItemInfo(item);
+}
+
+// 按「×」拿掉抓錯的個股：直接消失、不能復原（2026/10/26 發起人決定），按錯就刪掉整則重貼
+function removeStock(item, code) {
+  const hadFocus = document.activeElement?.classList.contains("chip-remove");
+  item.removed.add(code);
+  const card = updateItemInfo(item);
+  // 按鈕跟著那一檔不見了，用鍵盤操作的人接著停在同一則的下一個「×」
+  if (hadFocus) card?.querySelector(".chip-remove")?.focus({ preventScroll: true });
 }
 
 function updateOcrProgress(item) {
@@ -1473,6 +1659,10 @@ function mergeUp(index) {
     text: joinText(prev.text, item.text),
     images: [...prev.images, ...item.images],
     ocr: prev.ocr ?? item.ocr,
+    removed: new Set([...prev.removed, ...item.removed]),
+    answers: new Map([...prev.answers, ...item.answers]),
+    openPending: null,
+    labelEdit: null,
     error: "",
     cache: null,
   };
@@ -1484,8 +1674,9 @@ function changeType(item, type) {
   if (type === item.type) return;
   if (type === "text") {
     // 網址改成文字：不抓了，分享文字和網址都變成這則的內容
+    // 文字類沒有「×」，改成直接改字，所以原本拿掉的個股不再拿掉
     item.text = joinText(item.note, item.url, item.text);
-    Object.assign(item, { type: "text", note: "", fetch: { status: "idle" } });
+    Object.assign(item, { type: "text", note: "", fetch: { status: "idle" }, removed: new Set() });
   } else {
     const found = extractUrl(item.text);
     if (!found) {

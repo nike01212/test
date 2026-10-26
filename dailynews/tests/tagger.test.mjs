@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { buildMatcher } from "../public/matcher.js";
-import { buildTagger, compileKeyword, companyLabel, describeLabels } from "../public/tagger.js";
+import { applyAnswers, buildMatcher, pendingKey, withoutCodes } from "../public/matcher.js";
+import { buildTagger, compileKeyword, companyLabel, describeLabels, mergeChange } from "../public/tagger.js";
 
 const load = async (name) => JSON.parse(await readFile(new URL(`../public/data/${name}`, import.meta.url), "utf8"));
 const tagsConfig = await load("tags.json");
@@ -226,4 +226,65 @@ test("大廠別名不會和其他大廠重複", () => {
       seen.set(key, c.en);
     }
   }
+});
+
+test("預覽按「×」拿掉的個股：只拿掉已對上的那幾檔，待確認的不動", () => {
+  const mentions = [
+    { status: "ok", code: "3504" },
+    { status: "ok", code: "8284" },
+    { status: "pending", raw: "統一", candidates: ["1216"] },
+  ];
+  assert.deepEqual(withoutCodes(mentions, new Set(["8284"])), [mentions[0], mentions[2]]);
+  assert.deepEqual(withoutCodes(mentions, new Set(["8284", "3504"])), [mentions[2]]);
+  // 待確認的沒有代號，拿掉名單裡就算有它的候選代號也不動
+  assert.deepEqual(withoutCodes(mentions, new Set(["1216"])), mentions);
+  assert.equal(withoutCodes(mentions, new Set()), mentions);
+});
+
+test("拿掉抓錯的個股後標籤重算：剩一檔時整則內容都算它的", () => {
+  const text = "揚明光接獲車用鏡頭新訂單\n法人透過三竹的看盤軟體追蹤\n公司表示本季營收可望創新高";
+  const found = matcher.analyze(text).mentions;
+  assert.deepEqual(found.map((m) => m.code), ["3504", "8284"]);
+  // 提到兩檔：揚明光只看提到它的那一行
+  assert.deepEqual(byCode(tagger.tagMentions(text, found), "3504").tags, ["新訂單"]);
+  // 拿掉三竹之後就像本來只提到揚明光：第三行的「營收創新高」「公司表示」也算它的
+  const [m] = tagger.tagMentions(text, withoutCodes(found, new Set(["8284"])));
+  assert.equal(m.code, "3504");
+  assert.deepEqual(m.tags, ["新訂單", "營收創高", "6人說"]);
+});
+
+test("預覽裡改標籤：加的貼到每一檔、拿掉的從每一檔拿掉，依設定檔的順序", () => {
+  const mentions = [
+    { status: "ok", code: "3037", tags: ["擴產", "合作"], partners: ["輝達（NVIDIA）", "三星（Samsung）"] },
+    { status: "pending", raw: "三星", tags: ["擴產"], partners: ["三星（Samsung）"] },
+  ];
+  const changed = tagger.applyChange(mentions, {
+    tags: { add: ["漲價", "手機鏡頭"], remove: ["擴產"] },
+    partners: { add: [], remove: ["三星（Samsung）"] },
+  });
+  assert.deepEqual(changed[0].tags, ["漲價", "合作", "手機鏡頭"]);
+  assert.deepEqual(changed[0].partners, ["輝達（NVIDIA）"]);
+  assert.deepEqual(changed[1].tags, ["漲價", "手機鏡頭"]);
+  assert.deepEqual(changed[1].partners, []);
+  // 原本的不會被改到
+  assert.deepEqual(mentions[0].tags, ["擴產", "合作"]);
+});
+
+test("預覽裡改好幾次標籤：之前加的這次拿掉就變成拿掉，反過來也一樣", () => {
+  const first = mergeChange(null, new Set(["合作", "漲價"]), ["合作", "擴產"]);
+  assert.deepEqual(first, { add: ["漲價"], remove: ["擴產"] });
+  const second = mergeChange(first, new Set(["合作", "擴產"]), ["合作", "漲價"]);
+  assert.deepEqual(second, { add: ["擴產"], remove: ["漲價"] });
+  assert.deepEqual(mergeChange(second, new Set(["合作"]), ["合作"]), second);
+});
+
+test("待確認回答「不是個股」之後標籤重算：剩一檔時整則內容都算它的", () => {
+  const text = "三星宣布擴產\n欣興(3037)接獲新訂單";
+  const found = matcher.analyze(text).mentions;
+  const pending = found.find((m) => m.status === "pending");
+  assert.ok(pending, "「三星」應該是待確認");
+  assert.deepEqual(byCode(tagger.tagMentions(text, found), "3037").tags, ["新訂單"]);
+  const [m] = tagger.tagMentions(text, applyAnswers(found, new Map([[pendingKey(pending), null]])));
+  assert.equal(m.code, "3037");
+  assert.deepEqual(m.tags, ["新訂單", "擴產"]);
 });

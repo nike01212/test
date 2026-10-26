@@ -91,6 +91,7 @@ export function buildMatcher(stocksData, rules = {}) {
   const dict = new Map(); // 正規化後的名稱 → { tier, codes, ambiguous, ignore }
   const lengthsByFirstChar = new Map(); // 第一個字 → 可能的長度（由長到短，用來找最長的名稱）
   const keysByCode = new Map(); // 代號 → 所有名稱（標示原文用）
+  const formerByCode = new Map(); // 代號 → 已經併進這一家的舊公司名稱（name-rules.json 的 merged）
 
   function register(key, tier) {
     let e = dict.get(key);
@@ -134,6 +135,12 @@ export function buildMatcher(stocksData, rules = {}) {
   }
   for (const [alias, code] of Object.entries(rules.aliases ?? {})) {
     if (stocks.has(code)) addName(alias, code, TIER_MANUAL);
+  }
+  // 下市、併進別家的公司（矽品 → 日月光投控）：比對、搜尋都和別名一樣，另外記下來給畫面標示
+  for (const [name, code] of Object.entries(rules.merged ?? {})) {
+    if (!stocks.has(code)) continue;
+    addName(name, code, TIER_MANUAL);
+    formerByCode.set(code, [...(formerByCode.get(code) ?? []), name]);
   }
   for (const word of rules.ambiguous ?? []) {
     const e = dict.get(normalize(word));
@@ -363,11 +370,57 @@ export function buildMatcher(stocksData, rules = {}) {
     return merged;
   }
 
+  // 這檔的句子裡寫的是哪個已經併進來的舊名稱（例如 3711 的句子裡有「矽品」），預覽和清單上標出來。
+  // 句子是從對到的地方截的，所以看存下來的句子就知道（每檔每則只存前 2 句，後面才寫舊名稱的不會標）
+  function formerNames(code, sentences) {
+    const names = formerByCode.get(code);
+    if (!names) return [];
+    const texts = sentences.map((s) => normalize(s).replace(/\s+/g, ""));
+    return names.filter((n) => texts.some((t) => t.includes(normalize(n).replace(/\s+/g, ""))));
+  }
+
   return {
     analyze,
     search,
     highlightRanges,
+    formerNames,
     stock: (code) => stocks.get(code),
     size: stocks.size,
   };
+}
+
+// 預覽時按「×」拿掉的個股（抓錯的，例如內文的「三竹」被認成三竹資訊）。只拿掉已對上的，待確認的不動。
+// 要在 tagger.tagMentions 之前拿掉，標籤和合作對象才會當作沒提到那檔重算：剩一檔時整則內容都算它的
+export function withoutCodes(mentions, codes) {
+  if (!codes?.size) return mentions;
+  return mentions.filter((m) => !(m.status === "ok" && codes.has(m.code)));
+}
+
+// 待確認在預覽裡的答案用這個當鑰匙：同一則改字、重新比對之後，同一個待確認還對得上
+export function pendingKey(m) {
+  return `${m.raw}|${(m.candidates ?? []).join(",")}|${m.reason}`;
+}
+
+// 預覽裡回答的待確認（answers：pendingKey → 代號，null 是「不是個股」）。是某一檔就變成對上的個股，
+// 同一檔已經對上了就把句子併進去；不是個股就拿掉；沒回答的照舊送出、到清單上再確認。
+// 要在 tagger.tagMentions 之前做，標籤和合作對象才會照答案重算
+export function applyAnswers(mentions, answers) {
+  if (!answers?.size) return mentions;
+  const ok = new Map(mentions.filter((m) => m.status === "ok").map((m) => [m.code, m]));
+  const pending = [];
+  for (const m of mentions) {
+    if (m.status === "ok") continue;
+    const key = pendingKey(m);
+    if (!answers.has(key)) {
+      pending.push(m);
+      continue;
+    }
+    const code = answers.get(key);
+    if (!code) continue;
+    const prev = ok.get(code);
+    const merged = { status: "ok", code, sentences: [...(prev?.sentences ?? [])], spans: [...(prev?.spans ?? []), ...(m.spans ?? [])] };
+    for (const s of m.sentences) pushSentence(merged.sentences, s);
+    ok.set(code, merged);
+  }
+  return [...ok.values(), ...pending];
 }

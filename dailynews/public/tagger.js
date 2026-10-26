@@ -121,6 +121,16 @@ export function buildTagger(tagsConfig = {}, companiesConfig = {}) {
     };
   }
 
+  // 預覽裡「改標籤」：加的貼到這一則的每一檔、拿掉的從每一檔拿掉（change 見 mergeChange），依設定檔的順序
+  function applyChange(mentions, change) {
+    const edit = (now, { add = [], remove = [] } = {}) => [...now.filter((x) => !remove.includes(x)), ...add];
+    return mentions.map((m) => ({
+      ...m,
+      tags: sortTags(edit(list(m.tags), change?.tags)),
+      partners: sortPartners(edit(list(m.partners), change?.partners)),
+    }));
+  }
+
   // 手動加合作對象：完全一樣的排最前面，再來是開頭一樣、包含這幾個字的；同一級依名單順序（市值排名）
   function searchCompanies(query, limit = 8) {
     const q = searchKey(query);
@@ -147,6 +157,7 @@ export function buildTagger(tagsConfig = {}, companiesConfig = {}) {
     findCompany,
     judge: (text) => judgeNormalized(normalize(String(text ?? ""))),
     tagMentions,
+    applyChange,
     union,
     sortTags,
     sortPartners,
@@ -159,4 +170,22 @@ export function describeLabels({ tags = [], partners = [] } = {}) {
   if (tags.length) parts.push(tags.join(LABEL_SEPARATOR));
   if (partners.length) parts.push(`合作對象：${partners.join(LABEL_SEPARATOR)}`);
   return parts.join("；");
+}
+
+// 預覽裡每按一次「完成」，把這次的改動（now 改完的、base 改之前的）併進之前的改動：
+// 之前加的這次拿掉就變成拿掉，反過來也一樣。回傳 { add, remove }
+export function mergeChange(prev, now, base) {
+  const add = new Set(prev?.add ?? []);
+  const remove = new Set(prev?.remove ?? []);
+  for (const x of now) {
+    if (base.includes(x)) continue;
+    add.add(x);
+    remove.delete(x);
+  }
+  for (const x of base) {
+    if (now.has(x)) continue;
+    remove.add(x);
+    add.delete(x);
+  }
+  return { add: [...add], remove: [...remove] };
 }
