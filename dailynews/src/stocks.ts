@@ -20,3 +20,8 @@ export function findStock(code: unknown): Stock | undefined {
   }
   return byCode.get(code);
 }
+
+// 全部上櫃股的代號（存上櫃收盤快照用）
+export function otcCodes(): string[] {
+  return (data.stocks as [string, string, string, string[]][]).filter((s) => s[2] === "上櫃").map((s) => s[0]);
+}

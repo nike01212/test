@@ -6,18 +6,21 @@
 // 收盤價、漲停價先向證交所即時報價系統查清單上那幾檔（資料很小，CPU 約 2 毫秒）。它只有最近一個交易日，
 // 比對過去的日子、或它連不上時，才改抓交易所的每日收盤資料：證交所那兩份有幾百 KB，正式站剛啟動時
 // 解析要 6～10 毫秒，快碰到免費方案的上限；櫃買中心則擋掉 Cloudflare 的機房，正式站上櫃一定抓不到。
+// 所以排程收盤後另外把全部上櫃股存一份「上櫃收盤快照」，上櫃股都先看快照（2026/10/27 修 10/22 比對失敗）。
 import { calendar } from "./calendar";
-import { findStock } from "./stocks";
+import { findStock, otcCodes } from "./stocks";
 import {
   isLimitUp,
+  loadTpexQuotes,
   MIS_BATCH,
   misUrl,
   NotPublished,
   parseMisQuotes,
-  parseTpexQuotes,
   parseTwseCloses,
   parseTwseLimits,
-  tpexQuotesUrl,
+  readSnapshot,
+  Replaced,
+  snapshotText,
   twseCloseUrl,
   twseLimitsUrl,
   type Quote,
@@ -35,8 +38,8 @@ const MIS_TIMEOUT_MS = 30_000;
 const MIS_RETRY_DELAY_MS = 3_000;
 // 「重新比對」（整頁重抓）的間隔：證交所對同一個來源短時間內太多次的請求會暫時擋掉，避免大家同時一直按
 export const MANUAL_COOLDOWN_SECONDS = 60;
-// 櫃買中心的漲停價在前一個交易日那一份裡。遇到臨時休市（例如颱風假）那天沒資料，最多再往前找幾天
-const TPEX_LOOKBACK = 3;
+// 上櫃收盤快照至少要查到幾成的上櫃股才存（2026/10/27 實測 896 檔查到 895 檔），太少多半是即時報價系統出問題
+const SNAPSHOT_MIN_RATIO = 0.9;
 
 const REQUEST_HEADERS = {
   "User-Agent":
@@ -95,29 +98,16 @@ async function fetchText(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<str
   return res.text();
 }
 
-// 櫃買中心：收盤價在當天那一份，漲停價在前一個交易日那一份的「次日漲停價」
-async function loadTpex(day: string, codes: Set<string>): Promise<Map<string, Quote>> {
-  const today = parseTpexQuotes(await fetchText(tpexQuotesUrl(day)), day, codes);
-  let before: ReturnType<typeof parseTpexQuotes> | null = null;
-  let prev = day;
-  for (let i = 0; i < TPEX_LOOKBACK && !before; i++) {
-    prev = previousTradingDay(prev, calendar);
-    try {
-      before = parseTpexQuotes(await fetchText(tpexQuotesUrl(prev)), prev, codes);
-    } catch (err) {
-      if (!(err instanceof NotPublished)) throw err;
-    }
-  }
-  if (!before) throw new Error("找不到櫃買中心前一個交易日的收盤行情（漲停價要從那裡拿）");
-  const out = new Map<string, Quote>();
-  for (const code of codes) {
-    out.set(code, { close: today.get(code)?.close ?? null, limitUp: before.get(code)?.nextLimitUp ?? null });
-  }
-  return out;
+// 證交所：漲停價在「股價升降幅度」，收盤價在「每日收盤行情」
+async function loadTwse(day: string, codes: Set<string>): Promise<Map<string, Quote>> {
+  const [limitsText, closeText] = await Promise.all([fetchText(twseLimitsUrl(day)), fetchText(twseCloseUrl(day))]);
+  const closes = parseTwseCloses(closeText, day, codes);
+  const limits = parseTwseLimits(limitsText, day, codes);
+  return new Map([...codes].map((code) => [code, { close: closes.get(code) ?? null, limitUp: limits.get(code) ?? null }]));
 }
 
 // 證交所即時報價系統：只查需要的那幾檔，一次最多 MIS_BATCH 檔
-async function loadMis(day: string, candidates: Candidate[]): Promise<Map<string, Quote>> {
+async function loadMis(day: string, candidates: { code: string; market: string }[]): Promise<Map<string, Quote>> {
   const list = candidates.map((c) => ({ code: c.code, market: c.market === "上櫃" ? ("otc" as const) : ("tse" as const) }));
   const out = new Map<string, Quote>();
   for (let i = 0; i < list.length; i += MIS_BATCH) {
@@ -135,45 +125,92 @@ async function loadMis(day: string, candidates: Candidate[]): Promise<Map<string
   return out;
 }
 
-// 交易所的每日收盤資料：上市抓證交所兩份；上櫃抓櫃買中心兩份（只取需要的那幾列，不把整份轉成物件）
-async function loadDaily(day: string, candidates: Candidate[]): Promise<Map<string, Quote>> {
-  const twse = new Set(candidates.filter((c) => c.market === "上市").map((c) => c.code));
-  const tpex = new Set(candidates.filter((c) => c.market === "上櫃").map((c) => c.code));
+// 抓這幾檔在這天的收盤價和漲停價。上櫃先看收盤快照，其他的問即時報價系統，不行再抓交易所的每日收盤資料：
+// 上市抓證交所、上櫃抓櫃買中心，分開抓，一邊不行另一邊照樣用（以前一邊不行就整批不存）。
+// 抓不到的不在 quotes 裡，原因在 error；note：用了每日收盤資料就寫進比對結果的說明
+export async function loadQuotes(
+  day: string,
+  candidates: Candidate[],
+  snapshot: Map<string, Quote>,
+): Promise<{ quotes: Map<string, Quote>; note: string; error: Error | null }> {
   const quotes = new Map<string, Quote>();
-  if (twse.size) {
-    const [limitsText, closeText] = await Promise.all([fetchText(twseLimitsUrl(day)), fetchText(twseCloseUrl(day))]);
-    const closes = parseTwseCloses(closeText, day, twse);
-    const limits = parseTwseLimits(limitsText, day, twse);
-    for (const code of twse) quotes.set(code, { close: closes.get(code) ?? null, limitUp: limits.get(code) ?? null });
+  for (const c of candidates) {
+    const q = c.market === "上櫃" ? snapshot.get(c.code) : undefined;
+    if (q) quotes.set(c.code, q);
   }
-  if (tpex.size) {
-    const otc = await loadTpex(day, tpex);
-    for (const code of tpex) quotes.set(code, otc.get(code) ?? { close: null, limitUp: null });
-  }
-  return quotes;
-}
+  const rest = candidates.filter((c) => !quotes.has(c.code));
+  if (rest.length === 0) return { quotes, note: "", error: null };
 
-// 抓這幾檔在這天的收盤價和漲停價：先用即時報價系統，不行再抓每日收盤資料。
-// note：用了備案就寫進比對結果的說明
-export async function loadQuotes(day: string, candidates: Candidate[]): Promise<{ quotes: Map<string, Quote>; note: string }> {
   let misError: Error;
   try {
-    const mis = await loadMis(day, candidates);
-    const quotes = new Map(candidates.map((c) => [c.code, mis.get(c.code) ?? { close: null, limitUp: null }]));
-    return { quotes, note: "" };
+    const mis = await loadMis(day, rest);
+    for (const c of rest) quotes.set(c.code, mis.get(c.code) ?? { close: null, limitUp: null });
+    return { quotes, note: "", error: null };
   } catch (err) {
     misError = err as Error;
     console.log(`即時報價系統：${misError.message}，改抓交易所的每日收盤資料`);
   }
-  try {
-    return { quotes: await loadDaily(day, candidates), note: "用交易所每日收盤資料" };
-  } catch (err) {
-    // 兩邊都還沒公布才算「還沒公布」，晚一點再試；其他情況兩個原因都寫出來
-    if (err instanceof NotPublished && misError instanceof NotPublished) throw err;
-    // 正式站抓不到櫃買中心，即時報價系統又換成別天的資料時，上櫃就補不到了
-    const otc = candidates.some((c) => c.market === "上櫃") ? "。上櫃只能在當天收盤後、隔天開盤前比對" : "";
-    throw new Error(`${misError.message}，改抓每日收盤資料也不行（${(err as Error).message}）${otc}`);
+
+  let note = "";
+  const errors: Error[] = [];
+  for (const market of ["上市", "上櫃"]) {
+    const codes = new Set(rest.filter((c) => c.market === market).map((c) => c.code));
+    if (codes.size === 0) continue;
+    try {
+      const daily =
+        market === "上市"
+          ? await loadTwse(day, codes)
+          : await loadTpexQuotes(day, codes, fetchText, (d) => previousTradingDay(d, calendar));
+      for (const code of codes) quotes.set(code, daily.get(code) ?? { close: null, limitUp: null });
+      note = "用交易所每日收盤資料";
+    } catch (err) {
+      errors.push(err as Error);
+    }
   }
+  if (errors.length === 0) return { quotes, note, error: null };
+  // 兩邊都還沒公布才算「還沒公布」，晚一點再試；其他情況兩個原因都寫出來
+  if (misError instanceof NotPublished && errors.every((e) => e instanceof NotPublished)) {
+    return { quotes, note, error: errors[0] };
+  }
+  // 即時報價系統已經換成之後的日子，上櫃又沒有快照：正式站再也抓不到，只能用家裡的電腦補快照
+  const lost = misError instanceof Replaced && rest.some((c) => c.market === "上櫃" && !quotes.has(c.code));
+  const hint = lost ? `。${day.slice(5, 7)}/${day.slice(8)} 收盤後沒有存到上櫃的收盤資料，要請發起人用家裡的電腦補` : "";
+  const why = errors.map((e) => e.message).join("；");
+  return { quotes, note, error: new Error(`${misError.message}，改抓每日收盤資料也不行（${why}）${hint}`) };
+}
+
+// 上櫃收盤快照裡這幾檔的收盤價、漲停價（沒有快照、或沒有上櫃股就是空的）
+async function loadSnapshot(env: Env, day: string, candidates: Candidate[]): Promise<Map<string, Quote>> {
+  const codes = candidates.filter((c) => c.market === "上櫃").map((c) => c.code);
+  if (codes.length === 0) return new Map();
+  const row = await env.DB.prepare("SELECT quotes FROM otc_snapshots WHERE trading_day = ?")
+    .bind(day)
+    .first<{ quotes: string }>();
+  return row ? readSnapshot(row.quotes, codes) : new Map();
+}
+
+// 存這天的上櫃收盤快照：即時報價系統只有最近一個交易日（下一個交易日早上 8 點前就換掉），櫃買中心又擋掉
+// Cloudflare，所以收盤後把全部上櫃股（約 900 檔，一次 100 檔、查 9 次）存一份，之後才貼的上櫃股從這裡比對。
+// 一天一列（約 22 KB）；全部解析約 2 毫秒 CPU。存過就不再抓
+export async function saveOtcSnapshot(env: Env, day: string, nowMs = Date.now()): Promise<string> {
+  if (!isAfterClose(day, nowMs)) return `${day} 還沒收盤`;
+  const saved = await env.DB.prepare("SELECT count FROM otc_snapshots WHERE trading_day = ?")
+    .bind(day)
+    .first<{ count: number }>();
+  if (saved) return `${day} 已經存過（${saved.count} 檔）`;
+  const codes = otcCodes();
+  const quotes = await loadMis(day, codes.map((code) => ({ code, market: "上櫃" })));
+  if (quotes.size < codes.length * SNAPSHOT_MIN_RATIO) {
+    throw new Error(`即時報價系統只查到 ${quotes.size} 檔（上櫃共 ${codes.length} 檔）`);
+  }
+  await env.DB.prepare(
+    `INSERT INTO otc_snapshots (trading_day, quotes, count, source, created_at) VALUES (?, ?, ?, 'mis', ?)
+     ON CONFLICT (trading_day) DO NOTHING`,
+  )
+    .bind(day, snapshotText(codes, quotes), quotes.size, nowSeconds(nowMs))
+    .run();
+  const hits = [...quotes].filter(([, q]) => isLimitUp(q)).map(([code]) => code);
+  return `${day} 存了 ${quotes.size} 檔，收盤漲停 ${hits.length} 檔（${hits.join("、")}）`;
 }
 
 // 清單上的個股（已對上代號，含以前手動新增的）；all = false 時只要這天收盤還沒比對過的
@@ -224,39 +261,31 @@ export async function checkCloses(
       : await loadCandidates(env, listDay, day, all);
   if (candidates.length === 0) return { ...base, status: "done", message: "沒有新的個股要比對" };
 
-  let quotes: Map<string, Quote>;
-  let note = "";
-  try {
-    ({ quotes, note } = await loadQuotes(day, candidates));
-  } catch (err) {
-    const waiting = err instanceof NotPublished;
+  const { quotes, note, error } = await loadQuotes(day, candidates, await loadSnapshot(env, day, candidates));
+  // 抓到的照樣存起來；抓不到的下次比對（排程、「現在比對」）再試
+  const compared = candidates.filter((c) => quotes.has(c.code));
+  const hits: Hit[] = compared
+    .filter((c) => isLimitUp(quotes.get(c.code)))
+    .map((c) => ({ ...c, close: quotes.get(c.code)!.close! }));
+  let message = `比對 ${compared.length} 檔，收盤漲停 ${hits.length} 檔${note ? `（${note}）` : ""}`;
+  let status: ClosingResult["status"] = "done";
+  if (error) {
+    status = error instanceof NotPublished ? "waiting" : "error";
     // 收盤後好幾個小時還沒有資料，多半是那天臨時休市
     const late = taipeiParts(nowMs).date > day || taipeiParts(nowMs).minutes >= LAST_RUN_MINUTES;
-    const result: ClosingResult = {
-      ...base,
-      checked: candidates.length,
-      status: waiting ? "waiting" : "error",
-      message: `${(err as Error).message}${waiting && late ? "。到傍晚還沒有的話，可能是那天臨時休市（例如颱風假）" : ""}`,
-    };
-    if (!dryRun) await recordRun(env, result, nowMs).run();
+    const why = `${error.message}${status === "waiting" && late ? "。到傍晚還沒有的話，可能是那天臨時休市（例如颱風假）" : ""}`;
+    message = compared.length ? `${message}；另外 ${candidates.length - compared.length} 檔沒有比對到：${why}` : why;
+  }
+  const result: ClosingResult = { ...base, status, checked: candidates.length, hits, message };
+  if (dryRun) return result;
+  if (compared.length === 0) {
+    await recordRun(env, result, nowMs).run();
     return result;
   }
 
-  const hits: Hit[] = candidates
-    .filter((c) => isLimitUp(quotes.get(c.code)))
-    .map((c) => ({ ...c, close: quotes.get(c.code)!.close! }));
-  const result: ClosingResult = {
-    ...base,
-    status: "done",
-    checked: candidates.length,
-    hits,
-    message: `比對 ${candidates.length} 檔，收盤漲停 ${hits.length} 檔${note ? `（${note}）` : ""}`,
-  };
-  if (dryRun) return result;
-
   const now = nowSeconds(nowMs);
   await env.DB.batch([
-    ...candidates.map((c) => {
+    ...compared.map((c) => {
       const q = quotes.get(c.code);
       return env.DB.prepare(
         `INSERT INTO closes (trading_day, code, name, market, close, limit_up, hit, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -268,10 +297,12 @@ export async function checkCloses(
   return result;
 }
 
-// 排程（wrangler.jsonc）：收盤後到隔天開盤前跑好幾次，比對「現在貼會歸到的那一頁」新貼的個股。
-// 已經比對過的不再抓，沒有新的就直接結束
+// 排程（wrangler.jsonc）：收盤後到隔天開盤前跑好幾次。先存前一個交易日的上櫃收盤快照（存過就跳過，
+// 沒存成功下一次排程再試），再比對「現在貼會歸到的那一頁」新貼的個股（比對過的不再抓，沒有新的就直接結束）
 export async function scheduledClosing(env: Env, scheduledMs: number): Promise<string> {
   const listDay = assignTradingDay(scheduledMs, calendar).tradingDay;
+  const day = previousTradingDay(listDay, calendar);
+  const snapshot = await saveOtcSnapshot(env, day, scheduledMs).catch((err: Error) => `${day} 沒存成：${err.message}`);
   const r = await checkCloses(env, listDay, { nowMs: scheduledMs });
-  return `收盤比對：${listDay} 的清單 vs ${r.day} 收盤 ${r.status} ${r.message}${r.hits.length ? `（${r.hits.map((h) => h.code).join("、")}）` : ""}`;
+  return `上櫃收盤快照：${snapshot}\n收盤比對：${listDay} 的清單 vs ${r.day} 收盤 ${r.status} ${r.message}${r.hits.length ? `（${r.hits.map((h) => h.code).join("、")}）` : ""}`;
 }

@@ -7,9 +7,10 @@
 //   - 收盤價：當天那一份
 //   - 漲停價：前一個交易日那一份的「次日漲停價」
 // 證交所「基本市況報導」（即時報價系統 mis.twse.com.tw）：上市、上櫃都查得到，只查需要的那幾檔，
-// 資料很小，所以先用這個（src/closing.ts）。只有最近一個交易日的資料（隔天開盤前換掉）。
-// 櫃買中心擋掉雲端機房的連線（2026/10/23 實測，從 Cloudflare 連一律轉到錯誤頁），正式站上櫃只能靠這個，
-// 所以上櫃要在當天收盤後、隔天開盤前比對（排程本來就是當天跑）。
+// 資料很小，所以先用這個（src/closing.ts）。只有最近一個交易日的資料（下一個交易日早上 8 點前就換掉，
+// 2026/10/27 實測 07:5x 已經是當天的；休市日不換）。
+// 櫃買中心擋掉雲端機房的連線（2026/10/23 實測，從 Cloudflare 連一律轉到錯誤頁），正式站上櫃只能靠即時報價系統，
+// 所以排程收盤後把全部上櫃股存一份「上櫃收盤快照」（otc_snapshots），之後才貼進來的上櫃股從快照比對。
 //
 // 整份資料幾百 KB，免費方案每次排程只有 10 毫秒 CPU，所以不把整份 JSON 轉成物件，
 // 只在文字裡找需要的那幾檔（["2330", 開頭的那一列）再解析。
@@ -25,6 +26,9 @@ export interface Quote {
 
 // 資料還沒公布（排程晚一點會再試）
 export class NotPublished extends Error {}
+
+// 即時報價系統已經換成之後那個交易日的資料，這天的再也查不到了
+export class Replaced extends Error {}
 
 const compact = (day: string) => day.replaceAll("-", "");
 
@@ -42,8 +46,8 @@ export function twseCloseUrl(day: string): string {
   return `https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=json&date=${compact(day)}&type=ALLBUT0999`;
 }
 
-// 即時報價系統一次查幾檔
-export const MIS_BATCH = 50;
+// 即時報價系統一次查幾檔（2026/10/27 實測 100 檔可以，200 檔回「參數不足」）
+export const MIS_BATCH = 100;
 
 export function misUrl(stocks: { code: string; market: "otc" | "tse" }[]): string {
   const list = stocks.map((s) => `${s.market}_${s.code}.tw`).join("|");
@@ -177,6 +181,37 @@ export function parseTpexQuotes(
   return out;
 }
 
+// 櫃買中心的漲停價在前一個交易日那一份裡。遇到臨時休市（例如颱風假）那天沒資料，最多再往前找幾天
+const TPEX_LOOKBACK = 3;
+
+// 櫃買中心：收盤價在當天那一份，漲停價在前一個交易日那一份的「次日漲停價」。
+// 正式站抓不到（擋掉 Cloudflare），本機和 scripts/otc-snapshot.mjs（在家裡的電腦補上櫃收盤快照）用。
+// 怎麼抓網頁、前一個交易日是哪天由呼叫的人給，這個檔案才不用 import 別的檔案
+export async function loadTpexQuotes(
+  day: string,
+  codes: Set<string>,
+  fetchText: (url: string) => Promise<string>,
+  previousDay: (day: string) => string,
+): Promise<Map<string, Quote>> {
+  const today = parseTpexQuotes(await fetchText(tpexQuotesUrl(day)), day, codes);
+  let before: ReturnType<typeof parseTpexQuotes> | null = null;
+  let prev = day;
+  for (let i = 0; i < TPEX_LOOKBACK && !before; i++) {
+    prev = previousDay(prev);
+    try {
+      before = parseTpexQuotes(await fetchText(tpexQuotesUrl(prev)), prev, codes);
+    } catch (err) {
+      if (!(err instanceof NotPublished)) throw err;
+    }
+  }
+  if (!before) throw new Error("找不到櫃買中心前一個交易日的收盤行情（漲停價要從那裡拿）");
+  const out = new Map<string, Quote>();
+  for (const code of codes) {
+    if (today.has(code)) out.set(code, { close: today.get(code)!.close, limitUp: before.get(code)?.nextLimitUp ?? null });
+  }
+  return out;
+}
+
 interface MisRow {
   c?: string; // 代號
   d?: string; // 資料日期 20261022
@@ -187,23 +222,51 @@ interface MisRow {
 }
 
 // 即時報價系統：這天的收盤價和漲停價。收盤價是最後一盤的成交價，最後一盤沒有成交（例如漲停鎖住、沒有人賣）
-// 就用最後一筆成交價，這就是交易所公布的收盤價（2026/10/22 實測 140 檔，和證交所、櫃買的收盤價全部一樣）
+// 就用最後一筆成交價，這就是交易所公布的收盤價（2026/10/22 實測 140 檔，和證交所、櫃買的收盤價全部一樣）。
+// 收盤後每一檔的資料時間都是 13:30:00（整天沒成交的也是）。查的時候已經是 14:00 以後或之後的日子，
+// 就不看每一檔的時間：收盤快照一次查全部上櫃股，不能因為某一檔（例如暫停交易的）時間停在更早就整份不存
 export function parseMisQuotes(text: string, day: string): Map<string, Quote> {
-  let data: { rtcode?: string; msgArray?: MisRow[] };
+  let data: { rtcode?: string; msgArray?: MisRow[]; queryTime?: { sysDate?: string; sysTime?: string } };
   try {
     data = JSON.parse(text);
   } catch {
     throw new Error("即時報價系統回傳的不是資料（可能被擋了）");
   }
   if (!Array.isArray(data.msgArray)) throw new Error(`即時報價系統沒有回傳資料（${data.rtcode ?? "沒有代碼"}）`);
+  const sysDate = String(data.queryTime?.sysDate ?? "");
+  const closed = sysDate > compact(day) || (sysDate === compact(day) && String(data.queryTime?.sysTime ?? "") >= "14:00:00");
   const out = new Map<string, Quote>();
   for (const m of data.msgArray) {
     if (!m.c) continue;
     const d = String(m.d ?? "");
     if (d < compact(day)) throw new NotPublished(`即時報價系統還沒有 ${day} 的資料`);
-    if (d > compact(day)) throw new Error(`即時報價系統只有 ${d.slice(4, 6)}/${d.slice(6)} 的資料`);
-    if (String(m.t ?? "") < "13:30:00") throw new NotPublished(`即時報價系統的 ${day} 資料還沒收盤`);
+    if (d > compact(day)) throw new Replaced(`即時報價系統只有 ${d.slice(4, 6)}/${d.slice(6)} 的資料`);
+    if (!closed && String(m.t ?? "") < "13:30:00") throw new NotPublished(`即時報價系統的 ${day} 資料還沒收盤`);
     out.set(m.c, { close: toPrice(m.z) ?? toPrice(m.trade?.z), limitUp: toLimitUp(m.u) });
+  }
+  return out;
+}
+
+// 上櫃收盤快照（otc_snapshots.quotes）：{"3691":[109,109],"5455":[null,33.95]}，[收盤價, 漲停價]。
+// codes 每一檔都寫進去，查不到的寫 [null, null]（那天沒有資料，之後比對就算沒漲停，不會又去抓）
+export function snapshotText(codes: string[], quotes: Map<string, Quote>): string {
+  const out: Record<string, [number | null, number | null]> = {};
+  for (const code of codes) {
+    const q = quotes.get(code);
+    out[code] = [q?.close ?? null, q?.limitUp ?? null];
+  }
+  return JSON.stringify(out);
+}
+
+// 從快照取出需要的那幾檔；快照裡沒有的（例如存快照之後才上櫃的）不在結果裡
+export function readSnapshot(text: string, codes: Iterable<string>): Map<string, Quote> {
+  const data = JSON.parse(text) as Record<string, unknown>;
+  const out = new Map<string, Quote>();
+  for (const code of codes) {
+    const v = data[code];
+    if (!Array.isArray(v) || v.length !== 2) continue;
+    const [close, limitUp] = v.map((x) => (typeof x === "number" && x > 0 ? x : null));
+    out.set(code, { close, limitUp });
   }
   return out;
 }

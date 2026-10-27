@@ -119,7 +119,8 @@ export default {
   // wrangler.jsonc 的 triggers 有兩個排程，依 cron 分開處理（時間都是 UTC）
   async scheduled(controller, env, ctx): Promise<void> {
     if (controller.cron === CLOSING_CRON) {
-      // 台北 14:30、16:30、18:30、20:30、22:30、隔天 07:30：比對新貼的個股在前一個交易日收盤有沒有漲停（比對過的不再抓）
+      // 台北 14:30、16:30、18:30、20:30、22:30、隔天 07:30：先存前一個交易日的上櫃收盤快照（存過就跳過），
+      // 再比對新貼的個股在前一個交易日收盤有沒有漲停（比對過的不再抓）
       ctx.waitUntil(scheduledClosing(env, controller.scheduledTime).then(console.log));
       return;
     }

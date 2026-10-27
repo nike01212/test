@@ -9,6 +9,7 @@
     "types": "wrangler types",
     "check": "wrangler types && tsc --noEmit",
     "update-data": "node scripts/update-data.mjs",
+    "otc-snapshot": "node scripts/otc-snapshot.mjs",
     "test": "node --test tests/"
   },
   "devDependencies": {

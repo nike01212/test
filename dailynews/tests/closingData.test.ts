@@ -3,13 +3,17 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   isLimitUp,
+  loadTpexQuotes,
   misUrl,
   NotPublished,
   parseMisQuotes,
   parseTpexQuotes,
   parseTwseCloses,
   parseTwseLimits,
+  readSnapshot,
+  Replaced,
   scanRows,
+  snapshotText,
   toLimitUp,
   toPrice,
   tpexQuotesUrl,
@@ -126,9 +130,59 @@ test("即時報價系統 10/22：最後一盤沒成交就用最後一筆成交�
 
 test("即時報價系統：只有最近一個交易日，別天的資料不能用", async () => {
   const text = await fixture("mis-20261022.json");
+  assert.throws(() => parseMisQuotes(text, "2026-10-21"), Replaced);
   assert.throws(() => parseMisQuotes(text, "2026-10-21"), /只有 10\/22 的資料/);
   assert.throws(() => parseMisQuotes(text, "2026-10-27"), NotPublished);
   assert.throws(() => parseMisQuotes("<html>擋掉了</html>", "2026-10-22"), /不是資料/);
-  const open = text.replaceAll('"t":"13:30:00"', '"t":"11:05:00"');
+  // 盤中查（當天 11:05）：還沒收盤
+  const open = text
+    .replaceAll('"t":"13:30:00"', '"t":"11:05:00"')
+    .replace('"sysDate":"20261023"', '"sysDate":"20261022"')
+    .replace('"sysTime":"17:22:31"', '"sysTime":"11:05:10"');
   assert.throws(() => parseMisQuotes(open, "2026-10-22"), NotPublished);
+});
+
+test("即時報價系統：查的時候已經收盤了，某一檔時間停在更早（例如暫停交易）也照樣用", async () => {
+  const text = await fixture("mis-20261022.json");
+  const halted = text.replace('"t":"13:30:00"', '"t":"10:15:00"');
+  assert.notEqual(halted, text);
+  assert.equal(parseMisQuotes(halted, "2026-10-22").size, parseMisQuotes(text, "2026-10-22").size);
+  // 當天 14:00 以後查也算收盤了；13:40 還不算
+  const sameDay = (time: string) =>
+    halted.replace('"sysDate":"20261023"', '"sysDate":"20261022"').replace('"sysTime":"17:22:31"', `"sysTime":"${time}"`);
+  assert.equal(parseMisQuotes(sameDay("14:30:05"), "2026-10-22").get("3691")?.close, 109);
+  assert.throws(() => parseMisQuotes(sameDay("13:40:00"), "2026-10-22"), NotPublished);
+});
+
+test("上櫃收盤快照：每一檔都存，查不到的存 null，讀回來一樣", async () => {
+  const quotes = parseMisQuotes(await fixture("mis-20261022.json"), "2026-10-22");
+  const text = snapshotText(["3691", "4304", "5455", "9999"], quotes);
+  assert.equal(text, '{"3691":[109,109],"4304":[18.15,18.15],"5455":[null,33.95],"9999":[null,null]}');
+  const back = readSnapshot(text, ["3691", "5455", "9999", "1234"]);
+  assert.deepEqual([...back], [
+    ["3691", { close: 109, limitUp: 109 }],
+    ["5455", { close: null, limitUp: 33.95 }],
+    ["9999", { close: null, limitUp: null }],
+  ]); // 1234 不在快照裡
+  assert.equal(isLimitUp(back.get("3691")), true);
+});
+
+test("櫃買：前一個交易日沒資料（颱風假）就再往前找漲停價", async () => {
+  const files: Record<string, string> = {
+    "2026/10/22": "tpex-20261022.json",
+    "2026/10/21": "tpex-20261021.json",
+  };
+  const asked: string[] = [];
+  const fetchText = async (url: string) => {
+    const date = decodeURIComponent(/date=([^&]+)/.exec(url)![1]);
+    asked.push(date);
+    return fixture(files[date] ?? "tpex-20261023-empty.json");
+  };
+  // 假裝 10/22 的前一個交易日是沒資料的 10/23（行事曆還沒補上颱風假），再往前才是 10/21
+  const prev: Record<string, string> = { "2026-10-22": "2026-10-23", "2026-10-23": "2026-10-21" };
+  const quotes = await loadTpexQuotes("2026-10-22", new Set(["3691", "3105", "2073", "9999"]), fetchText, (d) => prev[d]);
+  assert.deepEqual(asked, ["2026/10/22", "2026/10/23", "2026/10/21"]);
+  assert.deepEqual(quotes.get("3691"), { close: 109, limitUp: 109 });
+  assert.equal(quotes.get("2073")?.close, null); // 當天沒有成交
+  assert.equal(quotes.has("9999"), false); // 櫃買中心沒有這檔
 });
