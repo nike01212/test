@@ -34,16 +34,32 @@ function withSiteHeaders(res: Response): Response {
   return out;
 }
 
-// 測試站把左上角的網站名稱（index.html 的 .brand）換成 SITE_BRAND；正式站沒設這個值，原樣送出
-function withBrand(res: Response, brand: string | undefined): Response {
-  if (!brand || !res.headers.get("Content-Type")?.startsWith("text/html")) return res;
-  return new HTMLRewriter()
-    .on(".brand", {
+// 測試站把左上角的網站名稱（index.html 的 .brand）換成 SITE_BRAND，分頁標題前面加 SITE_TITLE_PREFIX
+// （網頁之後換標題也會加：app.js 讀 <html> 的 data-title-prefix）；正式站兩個都沒設，原樣送出
+function withBrand(res: Response, brand: string | undefined, titlePrefix: string | undefined): Response {
+  if ((!brand && !titlePrefix) || !res.headers.get("Content-Type")?.startsWith("text/html")) return res;
+  const rewriter = new HTMLRewriter();
+  if (brand) {
+    rewriter.on(".brand", {
       element(el) {
         el.setInnerContent(brand);
       },
-    })
-    .transform(res);
+    });
+  }
+  if (titlePrefix) {
+    rewriter
+      .on("html", {
+        element(el) {
+          el.setAttribute("data-title-prefix", titlePrefix);
+        },
+      })
+      .on("title", {
+        element(el) {
+          el.prepend(titlePrefix);
+        },
+      });
+  }
+  return rewriter.transform(res);
 }
 
 function redirect(location: string): Response {
@@ -109,7 +125,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  return withBrand(await env.ASSETS.fetch(request), env.SITE_BRAND);
+  return withBrand(await env.ASSETS.fetch(request), env.SITE_BRAND, env.SITE_TITLE_PREFIX);
 }
 
 export default {

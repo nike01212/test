@@ -10,6 +10,7 @@ import {
   addDays,
   assignTradingDay,
   isIsoDate,
+  neighborDays,
   parseTaipeiLocal,
   previousTradingDay,
   previousTradingDays,
@@ -154,7 +155,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
     env.DB.prepare(
       "SELECT id, article_id, code, name, market, status, raw, reason, candidates, sentences, tags, partners, created_at FROM mentions WHERE trading_day = ? ORDER BY id",
     ).bind(date),
-    // 前後「有資料的日子」，用索引直接找，不用掃整張表
+    // 前後「有資料的日子」，用索引直接找，不用掃整張表（今日清單另外加，見 neighborDays）
     env.DB.prepare("SELECT MAX(trading_day) AS d FROM mentions WHERE trading_day < ?").bind(date),
     env.DB.prepare("SELECT MIN(trading_day) AS d FROM mentions WHERE trading_day > ?").bind(date),
     // 手動加的、手動移出的（自動的不存，下面用比對結果算）
@@ -189,8 +190,12 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   return json({
     date,
     today,
-    prevDate: (prev.results[0] as { d: string | null } | undefined)?.d ?? null,
-    nextDate: (next.results[0] as { d: string | null } | undefined)?.d ?? null,
+    ...neighborDays(
+      date,
+      today.tradingDay,
+      (prev.results[0] as { d: string | null } | undefined)?.d ?? null,
+      (next.results[0] as { d: string | null } | undefined)?.d ?? null,
+    ),
     articles: articles.results,
     mentions: mentionRows.map((m) => ({
       ...m,

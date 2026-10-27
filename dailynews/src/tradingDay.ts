@@ -123,3 +123,18 @@ export function assignTradingDay(ms: number, cal: Calendar): Assignment {
     missingYears: [...missing],
   };
 }
+
+// 清單頁的 ‹ ›：跳到前後有資料的日子（prevData、nextData：資料庫查到的，沒有就是 null）。
+// 今日清單沒資料也算一站，不然開盤後看前一天，按 › 會因為今天還沒人貼而按不到
+export function neighborDays(
+  date: string,
+  today: string,
+  prevData: string | null,
+  nextData: string | null,
+): { prevDate: string | null; nextDate: string | null } {
+  let prevDate = prevData;
+  let nextDate = nextData;
+  if (today < date && (prevDate === null || today > prevDate)) prevDate = today;
+  if (today > date && (nextDate === null || today < nextDate)) nextDate = today;
+  return { prevDate, nextDate };
+}

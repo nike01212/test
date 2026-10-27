@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow, noarchive" />
-    <title>今日清單 · 盤後新聞標的整理</title>
+    <title>盤後新聞標的整理</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/style.css" />
   </head>
@@ -15,9 +15,10 @@
     </header>
     <main>
       <section class="day-nav">
-        <button class="icon-button" id="prev-day" type="button" aria-label="前一個有資料的日子" title="前一個有資料的日子">‹</button>
+        <button class="icon-button" id="prev-day" type="button" aria-label="前一個有資料的日子" title="前一個有資料的日子（或今日清單）">‹</button>
         <div class="day-heading">
-          <h1><span id="list-title">今日清單</span>（<span id="count">0</span> 檔）</h1>
+          <!-- 讀到資料前不寫「今日清單」：網址帶 ?date= 的話載入的是別天 -->
+          <h1><span id="list-title">讀取中…</span><span id="count-wrap" hidden>（<span id="count">0</span> 檔）</span></h1>
           <p class="date">
             <span id="date"></span>
             <label class="date-pick">
@@ -26,7 +27,7 @@
             </label>
           </p>
         </div>
-        <button class="icon-button" id="next-day" type="button" aria-label="後一個有資料的日子" title="後一個有資料的日子">›</button>
+        <button class="icon-button" id="next-day" type="button" aria-label="後一個有資料的日子" title="後一個有資料的日子（或今日清單）">›</button>
       </section>
       <p class="back-today" id="back-today" hidden>
         <button class="link-button" id="go-today" type="button">回到今日清單</button>

@@ -28,6 +28,7 @@ const MAX_SOURCE_SENTENCES = 2;
 const QUICK_HINT = "點代號可以複製";
 const COMPANY_LIST_REFRESH_DAYS = 183; // 國際大廠名單大約每半年照市值排名更新一次，超過就在網頁最下面提醒
 const MITAKE_MAX_BYTES = 100_000; // 三竹的自選清單只有幾百個位元組，比這大的一定不是
+const TITLE_PREFIX = document.documentElement.dataset.titlePrefix ?? ""; // 測試站是「【測試站】」（伺服器加的），正式站沒有
 
 const state = {
   date: null, // 目前看的那一天
@@ -323,12 +324,13 @@ function render() {
 
   $("list-title").textContent = isToday ? "今日清單" : `${shortDate(data.date)}清單`;
   $("count").textContent = stocks.length;
+  $("count-wrap").hidden = false;
   $("date").textContent = `${formatDate(data.date)}開盤用`;
   $("date-picker").value = data.date;
   $("prev-day").disabled = !data.prevDate;
   $("next-day").disabled = !data.nextDate;
   $("back-today").hidden = isToday;
-  document.title = `${isToday ? "今日清單" : `${shortDate(data.date)}清單`} · 盤後新聞標的整理`;
+  document.title = `${TITLE_PREFIX}${isToday ? "今日清單" : `${shortDate(data.date)}清單`} · 盤後新聞標的整理`;
   renderPasteDay();
 
   $("pending").hidden = pending.length === 0;
@@ -2126,12 +2128,15 @@ window.addEventListener("storage", (e) => {
   if ($("quick").open) renderQuick();
 });
 document.addEventListener("visibilitychange", () => {
-  // 頁面放著過了 09:00，回來時重新算一次「會歸到」哪一天
+  // 頁面放著過了 09:00，回來時重新算一次「會歸到」哪一天；換天的話原本的「今日清單」變成前一天的清單，
+  // 標題和「回到今日清單」也要跟著改
   if (document.visibilityState === "visible" && state.data) {
     api("/api/trading-day")
       .then((today) => {
+        const changed = today.tradingDay !== state.data.today.tradingDay;
         state.data.today = today;
-        renderPasteDay();
+        if (changed) render();
+        else renderPasteDay();
       })
       .catch(() => {});
   }
@@ -2143,6 +2148,7 @@ pruneOld(taipeiNowLocal().slice(0, 10));
 loadMatcher().catch((err) => toast(`代號清單讀取失敗：${err.message}`, "bad"));
 loadTagger();
 loadList(new URLSearchParams(location.search).get("date")).catch((err) => {
+  $("list-title").textContent = "清單讀取失敗";
   $("db").textContent = "讀取失敗";
   $("db").className = "bad";
   toast(err.message, "bad");

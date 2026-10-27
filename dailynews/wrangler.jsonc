@@ -37,9 +37,11 @@
 		// 資料庫另外一個，密碼另外設：npx wrangler secret put GROUP_PASSWORD --env staging
 		"staging": {
 			"name": "dailynews-staging",
-			// 畫面左上角的網站名稱換成這個，一看就知道是測試站（正式站沒設，照 index.html 原本的字）
+			// 畫面左上角的網站名稱換成 SITE_BRAND、分頁標題前面加 SITE_TITLE_PREFIX，一看就知道是測試站
+			// （正式站都沒設，照 index.html 原本的字）
 			"vars": {
-				"SITE_BRAND": "盤後新聞標的整理 - 測試站"
+				"SITE_BRAND": "盤後新聞標的整理 - 測試站",
+				"SITE_TITLE_PREFIX": "【測試站】"
 			},
 			"d1_databases": [
 				{
