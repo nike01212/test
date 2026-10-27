@@ -13,6 +13,8 @@
   --mark: #ffe58f;
   --label-bg: #e8f0fe;
   --label-text: #1a4fa0;
+  --danger-bg: #fdecea;
+  --danger-text: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
   color-scheme: light dark;
 }
@@ -34,6 +36,8 @@
     --mark: #6b5a1e;
     --label-bg: #1c2a40;
     --label-text: #9cc1ff;
+    --danger-bg: #3a1f1d;
+    --danger-text: #1c1f24;
   }
 }
 
@@ -946,6 +950,81 @@ mark {
 .stock.picked {
   border-color: var(--accent);
   box-shadow: inset 4px 0 0 var(--accent);
+}
+
+/* 選取刪除（2026/10/27）：清單上面的標題列、刪除模式的提示、選到的卡片、底下黏著的那一條 */
+.stocks-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.stocks-head h2 {
+  margin: 0;
+}
+
+.delete-banner {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--danger-bg);
+  color: var(--error);
+  font-size: 0.9rem;
+}
+
+.stocks.deleting .stock {
+  cursor: pointer;
+}
+
+/* 刪除模式只留選取，改標籤藏起來 */
+.stocks.deleting .stock-labels button {
+  display: none;
+}
+
+.stock.delete-picked {
+  border-color: var(--error);
+  box-shadow: inset 4px 0 0 var(--error);
+  background: var(--danger-bg);
+}
+
+.delete-pick input {
+  accent-color: var(--error);
+}
+
+.delete-bar {
+  position: sticky;
+  bottom: 8px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--error);
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+}
+
+.delete-count {
+  margin-right: auto;
+  font-weight: 600;
+}
+
+.delete-bar button {
+  min-height: 40px;
+}
+
+.danger-button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--error);
+  color: var(--danger-text);
+  font-weight: 600;
+  padding: 8px 16px;
 }
 
 .tag.added {

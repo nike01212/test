@@ -40,7 +40,11 @@ const state = {
   dataInfo: "",
   tagInfo: "",
   labelEdit: null, // 正在改標籤的那一檔：{ code, base: { tags, partners }, tags: Set, partners: Set }
+  deleting: null, // 選取刪除：選了哪些代號（Set）；null 是平常（2026/10/27 發起人同意的設計）
   pasteDay: null, // 手動改的「會歸到」日期；null 代表照規則
+  // 自己選的那一頁（‹ ›、日期框、網址帶 ?date=、送出後跳過去的）；null 是今日清單，
+  // 或頁面放著過了 09:00 自己變成前一天的那頁（不是自己選的）
+  chosenDate: null,
   picked: new Set(), // 這天勾選的代號（只存在這台裝置）
   added: new Set(), // 逐檔快速加入時標記「已加入」的代號（只存在這台裝置）
   exportScope: "all", // "all" 當天全部、"picked" 只匯出已勾選
@@ -243,7 +247,8 @@ function stockPicker({ placeholder, onPick }) {
 
 // ---- 讀取與畫面 ----
 
-async function loadList(date) {
+// choose：這是自己選的那一頁（換頁、送出後跳過去），之後貼的歸到這一頁；重新讀同一頁時不帶，原本是不是自己選的照舊
+async function loadList(date, { choose = false } = {}) {
   const data = await api(`/api/list${date ? `?date=${date}` : ""}`);
   if (data.date !== state.date) {
     state.picked = loadCodes("picked", data.date);
@@ -251,10 +256,12 @@ async function loadList(date) {
     // 有勾選就預設只匯出勾選的
     state.exportScope = state.picked.size ? "picked" : "all";
     state.labelEdit = null;
+    state.deleting = null; // 換天就離開選取刪除
   }
   state.data = data;
   state.date = data.date;
   const isToday = data.date === data.today.tradingDay;
+  if (choose) state.chosenDate = isToday ? null : data.date;
   history.replaceState(null, "", isToday ? "/" : `/?date=${data.date}`);
   $("db").textContent = "連線正常";
   $("db").className = "ok";
@@ -341,6 +348,18 @@ function render() {
 
   renderWatch();
   renderExport();
+  // 選取刪除：別人刪掉的、這頁已經沒有的不算選了；清單空了就離開
+  if (state.deleting) {
+    const codes = new Set(stocks.map((s) => s.code));
+    state.deleting = stocks.length ? new Set([...state.deleting].filter((c) => codes.has(c))) : null;
+  }
+  $("stocks-head").hidden = stocks.length === 0;
+  $("stocks-count").textContent = stocks.length;
+  $("delete-mode").hidden = !!state.deleting;
+  $("delete-banner").hidden = !state.deleting;
+  $("delete-bar").hidden = !state.deleting;
+  $("stock-list").classList.toggle("deleting", !!state.deleting);
+  renderDeleteBar();
   $("stock-list").replaceChildren(
     ...(stocks.length
       ? stocks.map(renderStock)
@@ -395,22 +414,43 @@ function renderSource(src, code, extra) {
 function renderStock(s) {
   const count = s.sources.size;
   const picked = state.picked.has(s.code);
+  const deleting = !!state.deleting;
+  const toDelete = deleting && state.deleting.has(s.code);
   const card = h(
     "article",
-    { class: `card stock${picked ? " picked" : ""}`, "data-code": s.code },
+    {
+      class: `card stock${deleting ? (toDelete ? " delete-picked" : "") : picked ? " picked" : ""}`,
+      "data-code": s.code,
+      // 刪除模式點整張卡片就是選取（手機上比點小方框好按）；點到連結、按鈕、展開全文照原本的
+      onclick: deleting
+        ? (e) => !e.target.closest("a, button, summary, input, label") && toggleDelete(s.code)
+        : undefined,
+    },
     h(
       "header",
       { class: "stock-head" },
-      h(
-        "label",
-        { class: "pick", title: "勾選要匯出的個股" },
-        h("input", {
-          type: "checkbox",
-          checked: picked,
-          "aria-label": `勾選 ${s.code} ${s.name}`,
-          onchange: (e) => togglePick(s, e.target.checked, card),
-        }),
-      ),
+      // 刪除模式換成刪除用的選取，匯出的勾選先藏起來（兩個分開，免得把要匯出的勾選拿去刪）
+      deleting
+        ? h(
+            "label",
+            { class: "pick delete-pick", title: "選取要刪除的個股" },
+            h("input", {
+              type: "checkbox",
+              checked: toDelete,
+              "aria-label": `選取要刪除的 ${s.code} ${s.name}`,
+              onchange: () => toggleDelete(s.code),
+            }),
+          )
+        : h(
+            "label",
+            { class: "pick", title: "勾選要匯出的個股" },
+            h("input", {
+              type: "checkbox",
+              checked: picked,
+              "aria-label": `勾選 ${s.code} ${s.name}`,
+              onchange: (e) => togglePick(s, e.target.checked, card),
+            }),
+          ),
       h("span", { class: "code" }, s.code),
       h("span", { class: "name" }, s.name),
       h("span", { class: "tag" }, s.market),
@@ -419,16 +459,18 @@ function renderStock(s) {
       h("span", { class: "count" }, count ? `${count} 則` : "手動新增"),
       streakTag(s.code),
       addedTag(s.code),
-      h(
-        "button",
-        {
-          type: "button",
-          class: "link-button small danger",
-          "aria-label": `刪除 ${s.code} ${s.name}`,
-          onclick: () => deleteStock(s),
-        },
-        "刪除",
-      ),
+      deleting
+        ? null
+        : h(
+            "button",
+            {
+              type: "button",
+              class: "link-button small danger",
+              "aria-label": `刪除 ${s.code} ${s.name}`,
+              onclick: () => deleteStock(s),
+            },
+            "刪除",
+          ),
     ),
     renderLabels(s),
     count ? h("ul", { class: "sources" }, [...s.sources.values()].map((src) => renderSource(src, s.code))) : null,
@@ -913,12 +955,6 @@ function togglePick(s, checked, card) {
   renderExport();
 }
 
-function pickAll() {
-  state.picked = new Set(state.stocks.map((s) => s.code));
-  saveCodes("picked", state.date, state.picked);
-  render();
-}
-
 function pickNone() {
   const count = state.stocks.filter((s) => state.picked.has(s.code)).length;
   if (!confirm(`取消 ${shortDate(state.date)}清單的全部 ${count} 個勾選？`)) return;
@@ -1082,10 +1118,12 @@ function renderArticle(a) {
 function renderPasteDay() {
   const today = state.data?.today;
   if (!today) return;
-  const day = state.pasteDay ?? today.tradingDay;
-  $("paste-day").textContent = formatDate(day);
+  const page = pageDay();
+  $("paste-day").textContent = formatDate(targetDay());
   const notes = [];
   if (state.pasteDay) notes.push("（手動指定）");
+  else if (page === state.data.date) notes.push("（你正在看這一天的清單）");
+  else if (page) notes.push(`（你正在看 ${shortDate(state.data.date)}，那天沒開盤，歸到下一個開盤日）`);
   else if (today.missingYears.length) notes.push(`（${today.missingYears.join("、")} 年休市行事曆還沒公布，只排除週末）`);
   $("paste-day-note").textContent = notes.join("");
   $("paste-day-change").textContent = state.pasteDay ? "改回自動" : "改日期";
@@ -1149,9 +1187,22 @@ function hostOf(url) {
   }
 }
 
-// 這次送出會歸到哪一天（抓網址時用來檢查是不是已經貼過）
+// 自己選了某一天的清單頁，貼的就歸到那一頁（2026/10/27 發起人要求），休市日那頁歸到下一個開盤日（伺服器算好的 openDay）。
+// 今日清單、或頁面放著過了 09:00 自己變成前一天的那頁不算，回傳 null，照貼的時間：
+// 手機分頁常常開著好幾天，晚上回來貼盤後新聞，不能因為畫面停在前一天就歸錯
+function pageDay() {
+  const d = state.data;
+  return d && state.chosenDate === d.date && d.date !== d.today.tradingDay ? d.openDay : null;
+}
+
+// 送出時指定的日期：手動改的 > 正在看的那一頁；都沒有是 null，交給伺服器照貼的時間算
+function chosenPasteDay() {
+  return state.pasteDay ?? pageDay();
+}
+
+// 這次送出會歸到哪一天（畫面上的「會歸到」，抓網址時也用來檢查是不是已經貼過）
 function targetDay() {
-  return state.pasteDay ?? state.data?.today.tradingDay ?? null;
+  return chosenPasteDay() ?? state.data?.today.tradingDay ?? null;
 }
 
 // 拿來比對個股的內容：網址是抓到的標題和內文，加上自己補貼的
@@ -1854,7 +1905,7 @@ async function submitPreview() {
           // 圖片另外存出處和辨識出來的全文，文字另外存每檔的那一段（mentions 的 passage）；網址只存擷取句
           source: item.type === "image" ? item.source : null,
           body: item.type === "image" ? item.text : null,
-          tradingDay: state.pasteDay,
+          tradingDay: chosenPasteDay(),
           mentions: st.analysis.mentions.map((m) => Object.fromEntries(MENTION_FIELDS.map((k) => [k, m[k]]))),
         },
       });
@@ -1875,7 +1926,7 @@ async function submitPreview() {
   }
   preview.submitting = false;
   if (preview.items.length === 0) setPasteDay(null);
-  if (day) await loadList(day).catch((err) => toast(err.message, "bad"));
+  if (day) await loadList(day, { choose: true }).catch((err) => toast(err.message, "bad"));
   // 新貼的個股馬上比對前一個交易日收盤有沒有漲停（不用等排程）；還沒收盤會直接略過
   if (day && tally.sent) checkClosing(day, { quiet: true });
 
@@ -1911,6 +1962,69 @@ async function deleteStock(s) {
   await run(async () => {
     await api(`/api/stocks?date=${state.date}&code=${encodeURIComponent(s.code)}`, { method: "DELETE" });
     toast(`已刪除 ${s.code} ${s.name}`);
+    await loadList(state.date);
+  });
+}
+
+// ---- 選取刪除（2026/10/27 發起人同意的設計，見 PLAN「個股複選刪除」）----
+// 刪掉的大家都看不到，所以和匯出的勾選（只存在自己的瀏覽器）分開選；按「刪除 N 檔」先確認，不能復原
+
+function enterDeleteMode() {
+  state.deleting = new Set();
+  state.labelEdit = null;
+  render();
+}
+
+function exitDeleteMode() {
+  state.deleting = null;
+  render();
+}
+
+// 只換那一張卡片和底下那一條，不整頁重畫
+function toggleDelete(code) {
+  if (!state.deleting) return;
+  if (state.deleting.has(code)) state.deleting.delete(code);
+  else state.deleting.add(code);
+  const card = $("stock-list").querySelector(`[data-code="${code}"]`);
+  if (card) {
+    card.classList.toggle("delete-picked", state.deleting.has(code));
+    const box = card.querySelector(".delete-pick input");
+    if (box) box.checked = state.deleting.has(code);
+  }
+  renderDeleteBar();
+}
+
+function renderDeleteBar() {
+  if (!state.deleting) return;
+  const n = state.deleting.size;
+  const all = n > 0 && n === state.stocks.length;
+  $("delete-count").textContent = `已選 ${n} 檔`;
+  $("delete-all").textContent = all ? "全不選" : "全選";
+  $("delete-confirm").textContent = `刪除 ${n} 檔`;
+}
+
+function toggleDeleteAll() {
+  if (!state.deleting) return;
+  const all = state.deleting.size === state.stocks.length;
+  state.deleting = all ? new Set() : new Set(state.stocks.map((s) => s.code));
+  render();
+}
+
+async function deleteSelected() {
+  const chosen = state.stocks.filter((s) => state.deleting?.has(s.code));
+  if (chosen.length === 0) return toast("先點要刪除的個股", "bad");
+  const SHOW = 10;
+  const names = chosen.slice(0, SHOW).map((s) => `${s.code} ${s.name}`).join("、");
+  const more = chosen.length > SHOW ? `…等 ${chosen.length} 檔` : "";
+  if (!confirm(`從 ${shortDate(state.date)}的清單刪除這 ${chosen.length} 檔？\n${names}${more}\n大家都會看不到，不能復原。`)) return;
+  await run(async () => {
+    const codes = chosen.map((s) => s.code);
+    await api(`/api/stocks?date=${state.date}&codes=${codes.map(encodeURIComponent).join(",")}`, { method: "DELETE" });
+    // 匯出的勾選也拿掉
+    for (const c of codes) state.picked.delete(c);
+    saveCodes("picked", state.date, state.picked);
+    state.deleting = null;
+    toast(`已刪除 ${chosen.length} 檔`);
     await loadList(state.date);
   });
 }
@@ -2069,17 +2183,17 @@ window.addEventListener("beforeunload", (e) => {
 $("paste-day-change").addEventListener("click", () => {
   if (state.pasteDay) return setPasteDay(null);
   const input = $("paste-day-input");
-  input.value = state.data?.today.tradingDay ?? "";
+  input.value = targetDay() ?? "";
   input.hidden = false;
   input.focus();
 });
 $("paste-day-input").addEventListener("change", (e) => {
   if (e.target.value) setPasteDay(e.target.value);
 });
-$("prev-day").addEventListener("click", () => state.data?.prevDate && run(() => loadList(state.data.prevDate)));
-$("next-day").addEventListener("click", () => state.data?.nextDate && run(() => loadList(state.data.nextDate)));
-$("go-today").addEventListener("click", () => run(() => loadList(null)));
-$("date-picker").addEventListener("change", (e) => e.target.value && run(() => loadList(e.target.value)));
+$("prev-day").addEventListener("click", () => state.data?.prevDate && run(() => loadList(state.data.prevDate, { choose: true })));
+$("next-day").addEventListener("click", () => state.data?.nextDate && run(() => loadList(state.data.nextDate, { choose: true })));
+$("go-today").addEventListener("click", () => run(() => loadList(null, { choose: true })));
+$("date-picker").addEventListener("change", (e) => e.target.value && run(() => loadList(e.target.value, { choose: true })));
 $("watch-add").append(stockPicker({ placeholder: "手動加到延續性觀察：輸入代號或名稱", onPick: addWatch }));
 $("checker-input").addEventListener("change", runChecker);
 $("checker-input").addEventListener("input", runChecker);
@@ -2091,9 +2205,14 @@ for (const radio of document.querySelectorAll('input[name="export-scope"]')) {
     renderExport();
   });
 }
-$("pick-all").addEventListener("click", pickAll);
 $("mitake-file").addEventListener("change", (e) => importMitakeList(e.target));
 $("pick-none").addEventListener("click", pickNone);
+
+// 選取刪除
+$("delete-mode").addEventListener("click", enterDeleteMode);
+$("delete-cancel").addEventListener("click", exitDeleteMode);
+$("delete-all").addEventListener("click", toggleDeleteAll);
+$("delete-confirm").addEventListener("click", deleteSelected);
 
 // 逐檔快速加入
 $("quick-add-next").addEventListener("click", () => {
@@ -2154,7 +2273,7 @@ runChecker();
 pruneOld(taipeiNowLocal().slice(0, 10));
 loadMatcher().catch((err) => toast(`代號清單讀取失敗：${err.message}`, "bad"));
 loadTagger();
-loadList(new URLSearchParams(location.search).get("date")).catch((err) => {
+loadList(new URLSearchParams(location.search).get("date"), { choose: true }).catch((err) => {
   $("list-title").textContent = "清單讀取失敗";
   $("db").textContent = "讀取失敗";
   $("db").className = "bad";

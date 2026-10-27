@@ -11,6 +11,7 @@ import {
   assignTradingDay,
   isIsoDate,
   neighborDays,
+  openDayOf,
   parseTaipeiLocal,
   previousTradingDay,
   previousTradingDays,
@@ -31,6 +32,8 @@ const MAX_URL_LENGTH = 1000;
 const MAX_MENTIONS_PER_ARTICLE = 200;
 const MAX_CANDIDATES = 10;
 const MAX_IDS = 50;
+const MAX_DELETE_CODES = 500; // 選取刪除一次最多幾檔（一天的清單不會比這多）
+const SQL_PARAMS_PER_QUERY = 90; // D1 一個查詢最多 100 個參數，代號分批放
 // 標籤、合作對象（第 5 步）：瀏覽器依 public/data/ 的設定檔判斷好送來，這裡只整理格式，不對照設定檔
 // （設定檔改名或刪掉的標籤，已經存下來的還要能顯示、能拿掉）
 const MAX_LABELS = 20;
@@ -193,6 +196,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   return json({
     date,
     today,
+    openDay: openDayOf(date, calendar), // 在這一頁貼的要歸到哪一天（自己選了這一頁時用，見 app.js 的 pageDay）
     ...neighborDays(
       date,
       today.tradingDay,
@@ -363,16 +367,27 @@ async function handleDeleteArticle(env: Env, id: number): Promise<Response> {
   return json({ ok: true });
 }
 
-// DELETE /api/stocks?date=&code=：從這天的清單刪掉一檔（所有提到它的紀錄）
+// DELETE /api/stocks?date=&code=：從這天的清單刪掉一檔（所有提到它的紀錄）。
+// codes=2327,8284 一次刪好幾檔（清單上的「選取刪除」，2026/10/27 發起人同意的設計）：同一個 batch 是一筆交易，不會刪到一半
 async function handleDeleteStock(url: URL, env: Env): Promise<Response> {
   const date = url.searchParams.get("date");
-  const code = url.searchParams.get("code");
-  if (!isIsoDate(date) || !code) return badRequest("缺少日期或代號");
-  const res = await env.DB.prepare("DELETE FROM mentions WHERE trading_day = ? AND code = ? AND status = 'ok'")
-    .bind(date, code)
-    .run();
-  if (!res.meta.changes) return json({ error: "清單裡沒有這一檔" }, 404);
-  return json({ ok: true });
+  const raw = url.searchParams.get("codes") ?? url.searchParams.get("code") ?? "";
+  const codes = [...new Set(raw.split(",").map((c) => c.trim()).filter(Boolean))];
+  if (!isIsoDate(date) || codes.length === 0) return badRequest("缺少日期或代號");
+  if (codes.length > MAX_DELETE_CODES) return badRequest(`一次最多刪 ${MAX_DELETE_CODES} 檔`);
+  const statements: D1PreparedStatement[] = [];
+  for (let i = 0; i < codes.length; i += SQL_PARAMS_PER_QUERY) {
+    const chunk = codes.slice(i, i + SQL_PARAMS_PER_QUERY);
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM mentions WHERE trading_day = ? AND status = 'ok' AND code IN (${chunk.map(() => "?").join(", ")})`,
+      ).bind(date, ...chunk),
+    );
+  }
+  const results = await env.DB.batch(statements);
+  const deleted = results.reduce((n, r) => n + r.meta.changes, 0);
+  if (!deleted) return json({ error: codes.length > 1 ? "清單裡沒有這些個股" : "清單裡沒有這一檔" }, 404);
+  return json({ ok: true, deleted });
 }
 
 // 「加哪些、拿掉哪些」：{ add: [...], remove: [...] }

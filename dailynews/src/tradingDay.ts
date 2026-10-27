@@ -83,6 +83,12 @@ export function nextTradingDay(date: string, cal: Calendar): string {
   return stepTradingDay(date, cal, 1);
 }
 
+// 在某一天的清單頁貼的要歸到哪一天（2026/10/27 發起人要求：看哪一頁就歸哪一天）：
+// 那天有開盤就是那天，休市（例如用日期框選到週六）就是下一個開盤日
+export function openDayOf(date: string, cal: Calendar): string {
+  return closedReason(date, cal) ? nextTradingDay(date, cal) : date;
+}
+
 // 往前 n 個開盤日，由近到遠（不含 date 本身）
 export function previousTradingDays(date: string, cal: Calendar, n: number): string[] {
   const days: string[] = [];

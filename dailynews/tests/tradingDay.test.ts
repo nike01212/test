@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { assignTradingDay, neighborDays, parseTaipeiLocal, type Calendar } from "../src/tradingDay.ts";
+import { assignTradingDay, neighborDays, openDayOf, parseTaipeiLocal, type Calendar } from "../src/tradingDay.ts";
 
 const calendar: Calendar = JSON.parse(await readFile(new URL("../public/data/holidays.json", import.meta.url), "utf8"));
 
@@ -93,4 +93,12 @@ test("‹ ›：今日清單沒資料也停得到", () => {
   });
   // 今日之後也有資料（改日期移過去的），比今日近就先停那天
   assert.deepEqual(neighborDays("2026-11-05", "2026-10-28", "2026-11-02", null).prevDate, "2026-11-02");
+});
+
+test("在某一天的清單頁貼：有開盤就是那天，休市就是下一個開盤日", () => {
+  assert.equal(openDayOf("2026-10-27", calendar), "2026-10-27");
+  assert.equal(openDayOf("2026-10-22", calendar), "2026-10-22");
+  // 週六、光復節補假那頁 → 10/27（二）
+  assert.equal(openDayOf("2026-10-24", calendar), "2026-10-27");
+  assert.equal(openDayOf("2026-10-26", calendar), "2026-10-27");
 });

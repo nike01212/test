@@ -94,7 +94,6 @@
         <div class="export-head">
           <h2>匯出到自選</h2>
           <div class="pick-tools">
-            <button class="link-button small" id="pick-all" type="button">全選</button>
             <button class="link-button small" id="pick-none" type="button">全部取消勾選</button>
           </div>
         </div>
@@ -115,7 +114,21 @@
         <div class="export-groups" id="export-groups"></div>
       </section>
 
-      <section class="stocks" id="stock-list" aria-live="polite"></section>
+      <!-- 個股清單。「選取刪除」一次刪好幾檔（2026/10/27 發起人同意的設計），和匯出的勾選分開 -->
+      <section class="stocks-section" id="stocks-section">
+        <div class="stocks-head" id="stocks-head" hidden>
+          <h2>個股（<span id="stocks-count">0</span> 檔）</h2>
+          <button class="link-button small" id="delete-mode" type="button">選取刪除</button>
+        </div>
+        <p class="delete-banner" id="delete-banner" hidden>刪除模式：刪掉的大家都看不到，只刪這一天。點卡片選取。</p>
+        <div class="stocks" id="stock-list" aria-live="polite"></div>
+        <div class="delete-bar" id="delete-bar" hidden>
+          <span class="delete-count" id="delete-count">已選 0 檔</span>
+          <button class="link-button small" id="delete-all" type="button">全選</button>
+          <button class="secondary" id="delete-cancel" type="button">取消</button>
+          <button class="danger-button" id="delete-confirm" type="button">刪除 0 檔</button>
+        </div>
+      </section>
 
       <section class="card">
         <h2>這天貼入的資料（<span id="article-count">0</span> 則）</h2>
