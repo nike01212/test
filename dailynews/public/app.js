@@ -18,6 +18,7 @@ import {
 import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
 import { isPersistent, loadCodes, loadMitakeList, pruneOld, saveCodes, saveMitakeList } from "/marks.js";
 import { recognize } from "/ocr.js";
+import { withPassages } from "/passage.js";
 import { extractUrl, splitPaste } from "/split.js";
 import { buildTagger, describeLabels, mergeChange } from "/tagger.js";
 import { uncheckedCount, watchItems } from "/watch.js";
@@ -276,10 +277,11 @@ function groupStocks(data) {
       s.manual = true;
       continue;
     }
-    const src = s.sources.get(m.article_id) ?? { article: articles.get(m.article_id), sentences: [] };
+    const src = s.sources.get(m.article_id) ?? { article: articles.get(m.article_id), sentences: [], passages: [] };
     for (const t of m.sentences) {
       if (src.sentences.length < MAX_SOURCE_SENTENCES && !src.sentences.includes(t)) src.sentences.push(t);
     }
+    if (m.passage && !src.passages.includes(m.passage)) src.passages.push(m.passage);
     s.sources.set(m.article_id, src);
   }
   for (const s of stocks.values()) Object.assign(s, unionLabels(s.rows));
@@ -309,7 +311,7 @@ function groupPending(data) {
     const key = `${m.raw}|${m.candidates.join(",")}|${m.reason}`;
     const g = groups.get(key) ?? { raw: m.raw, reason: m.reason, candidates: m.candidates, ids: [], sources: [] };
     g.ids.push(m.id);
-    g.sources.push({ article: articles.get(m.article_id), sentences: m.sentences });
+    g.sources.push({ article: articles.get(m.article_id), sentences: m.sentences, passages: m.passage ? [m.passage] : [] });
     groups.set(key, g);
   }
   return [...groups.values()];
@@ -382,7 +384,10 @@ function renderSource(src, code, extra) {
       src.article ? h("span", { class: "muted" }, ` · ${taipeiTime(src.article.pasted_at)}`) : null,
     ),
     articleOrigin(src.article),
-    src.sentences.map((t) => h("blockquote", {}, highlight(t, code, extra))),
+    // 文字類（memo）存了跟這檔有關的那一段就顯示整段，沒有的（網址、圖片、10/27 之前貼的）照舊顯示句子
+    src.passages?.length
+      ? src.passages.map((t) => h("blockquote", { class: "passage" }, highlight(t, code, extra)))
+      : src.sentences.map((t) => h("blockquote", {}, highlight(t, code, extra))),
     articleBody(src.article),
   );
 }
@@ -1104,7 +1109,7 @@ async function run(action) {
 
 const BODY_PREVIEW = 1500; // 「看抓到的內容」最多顯示幾個字
 const TITLE_NOTE = 80; // 文字改成網址時，剩下的字在這個長度以內、只有一行，才當成分享文字
-const MENTION_FIELDS = ["status", "code", "raw", "reason", "candidates", "sentences", "tags", "partners"];
+const MENTION_FIELDS = ["status", "code", "raw", "reason", "candidates", "sentences", "passage", "tags", "partners"];
 
 function newItem(fields) {
   return {
@@ -1193,6 +1198,8 @@ function itemState(item) {
     const found = analysis.mentions.length;
     // 回答的待確認、拿掉的個股都在貼標籤之前處理，標籤和合作對象照結果重算（2026/10/26 發起人決定）
     analysis.mentions = withoutCodes(applyAnswers(analysis.mentions, item.answers), item.removed);
+    // 文字類（memo）每檔另外存跟它有關的那一段（2026/10/27 發起人要求）
+    if (item.type === "text") analysis.mentions = withPassages(content, analysis.mentions);
     if (state.tagger) {
       analysis.mentions = state.tagger.tagMentions(content, analysis.mentions);
       if (item.labelChange) analysis.mentions = state.tagger.applyChange(analysis.mentions, item.labelChange);
@@ -1844,7 +1851,7 @@ async function submitPreview() {
           title: itemTitle(item),
           url: item.type === "url" ? item.url : null,
           kind: item.type,
-          // 圖片另外存出處和辨識出來的全文；網址和文字只存擷取句
+          // 圖片另外存出處和辨識出來的全文，文字另外存每檔的那一段（mentions 的 passage）；網址只存擷取句
           source: item.type === "image" ? item.source : null,
           body: item.type === "image" ? item.text : null,
           tradingDay: state.pasteDay,

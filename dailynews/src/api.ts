@@ -17,12 +17,14 @@ import {
   taipeiParts,
 } from "./tradingDay";
 
-// 依 PRD 只存擷取句，不存全文；每檔每則最多 2 句。例外是圖片辨識出來的全文（10/23 發起人決定要存）
+// 依 PRD 只存擷取句，不存全文；每檔每則最多 2 句。例外是圖片辨識出來的全文（10/23 發起人決定要存），
+// 和文字類（貼上的 memo）每檔跟它有關的那一段（10/27 發起人要求，public/passage.js 切好送來）
 const MAX_SENTENCES = 2;
 const MAX_SENTENCE_LENGTH = 300;
 const MAX_TITLE_LENGTH = 120;
 const MAX_SOURCE_LENGTH = 120;
 const MAX_BODY_LENGTH = 20_000; // 圖片全文：一整版報紙大約一萬字
+const MAX_PASSAGE_LENGTH = 5_000; // 文字類每檔的那一段：外電整理一檔大約一兩百字，一整篇新聞也夠放
 export const BODY_KEEP_DAYS = 180; // 圖片全文保留幾天（10/23 發起人決定），之後每天排程刪掉
 const KINDS = new Set(["url", "text", "image"]);
 const MAX_URL_LENGTH = 1000;
@@ -54,6 +56,7 @@ interface MentionRow {
   reason: string | null;
   candidates: string | null;
   sentences: string;
+  passage: string | null;
   tags: string;
   partners: string;
   created_at: number; // 加進清單的時間（Unix 秒），清單依這個排
@@ -67,7 +70,7 @@ function cleanText(v: unknown, max: number): string {
   return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
 }
 
-// 保留換行（段落）的版本，給圖片全文用
+// 保留換行（段落）的版本，給圖片全文、文字類每檔的那一段用
 function cleanBody(v: unknown, max: number): string {
   if (typeof v !== "string") return "";
   return v
@@ -153,7 +156,7 @@ async function handleList(url: URL, env: Env): Promise<Response> {
       "SELECT id, title, url, kind, source, body, pasted_at FROM articles WHERE trading_day = ? ORDER BY pasted_at, id",
     ).bind(date),
     env.DB.prepare(
-      "SELECT id, article_id, code, name, market, status, raw, reason, candidates, sentences, tags, partners, created_at FROM mentions WHERE trading_day = ? ORDER BY id",
+      "SELECT id, article_id, code, name, market, status, raw, reason, candidates, sentences, passage, tags, partners, created_at FROM mentions WHERE trading_day = ? ORDER BY id",
     ).bind(date),
     // 前後「有資料的日子」，用索引直接找，不用掃整張表（今日清單另外加，見 neighborDays）
     env.DB.prepare("SELECT MAX(trading_day) AS d FROM mentions WHERE trading_day < ?").bind(date),
@@ -219,7 +222,8 @@ async function handleList(url: URL, env: Env): Promise<Response> {
   });
 }
 
-// POST /api/articles：瀏覽器比對完的結果。內容是標題、網址、出處、擷取句，以及每檔的標籤和合作對象；圖片另外存辨識出來的全文
+// POST /api/articles：瀏覽器比對完的結果。內容是標題、網址、出處、擷取句，以及每檔的標籤和合作對象；
+// 圖片另外存辨識出來的全文，文字另外存每檔的那一段
 async function handleCreateArticle(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (!body) return badRequest("格式錯誤");
@@ -243,21 +247,25 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   if (!Array.isArray(body.mentions) || body.mentions.length === 0) return badRequest("這則沒有找到個股");
   if (body.mentions.length > MAX_MENTIONS_PER_ARTICLE) return badRequest("一則提到的個股太多了，請分開貼");
 
-  // 同一則裡同一檔只留一列，句子、標籤、合作對象合併
-  const confirmed = new Map<string, { sentences: string[]; tags: string[]; partners: string[] }>();
-  const pending: { raw: string; reason: string; candidates: string[]; sentences: string[]; tags: string[]; partners: string[] }[] =
-    [];
+  // 同一則裡同一檔只留一列，句子、那一段、標籤、合作對象合併
+  type Labels = { sentences: string[]; passage: string | null; tags: string[]; partners: string[] };
+  const confirmed = new Map<string, Labels>();
+  const pending: ({ raw: string; reason: string; candidates: string[] } & Labels)[] = [];
   for (const m of body.mentions as Record<string, unknown>[]) {
     if (!m || typeof m !== "object") return badRequest("格式錯誤");
     const sentences = cleanSentences(m.sentences);
+    // 那一段只存文字類的（網址照舊只存擷取句，圖片的全文另外存在 articles.body）
+    const passage = kind === "text" ? cleanBody(m.passage, MAX_PASSAGE_LENGTH) || null : null;
     const tags = cleanLabels(m.tags);
     const partners = cleanLabels(m.partners);
     if (m.status === "ok") {
       if (!findStock(m.code)) return badRequest(`代號 ${String(m.code)} 不在上市櫃清單裡`);
       const code = m.code as string;
       const prev = confirmed.get(code);
+      const passages = [...new Set([prev?.passage, passage].filter((x): x is string => !!x))];
       confirmed.set(code, {
         sentences: cleanSentences([...(prev?.sentences ?? []), ...sentences]),
+        passage: cleanBody(passages.join("\n\n"), MAX_PASSAGE_LENGTH) || null,
         tags: cleanLabels([...(prev?.tags ?? []), ...tags]),
         partners: cleanLabels([...(prev?.partners ?? []), ...partners]),
       });
@@ -265,7 +273,7 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
       const candidates = Array.isArray(m.candidates)
         ? [...new Set(m.candidates.filter((c) => findStock(c)) as string[])].slice(0, MAX_CANDIDATES)
         : [];
-      pending.push({ raw: cleanText(m.raw, 40), reason: cleanText(m.reason, 100), candidates, sentences, tags, partners });
+      pending.push({ raw: cleanText(m.raw, 40), reason: cleanText(m.reason, 100), candidates, sentences, passage, tags, partners });
     } else {
       return badRequest("格式錯誤");
     }
@@ -283,13 +291,14 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
     const s = findStock(code)!;
     statements.push(
       env.DB.prepare(
-        `INSERT INTO mentions (trading_day, article_id, code, name, market, status, sentences, tags, partners, created_at) VALUES (?, ${articleId}, ?, ?, ?, 'ok', ?, ?, ?, ?)`,
+        `INSERT INTO mentions (trading_day, article_id, code, name, market, status, sentences, passage, tags, partners, created_at) VALUES (?, ${articleId}, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)`,
       ).bind(
         tradingDay,
         s.code,
         s.name,
         s.market,
         JSON.stringify(c.sentences),
+        c.passage,
         JSON.stringify(c.tags),
         JSON.stringify(c.partners),
         created,
@@ -300,13 +309,14 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   for (const p of pending) {
     statements.push(
       env.DB.prepare(
-        `INSERT INTO mentions (trading_day, article_id, status, raw, reason, candidates, sentences, tags, partners, created_at) VALUES (?, ${articleId}, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO mentions (trading_day, article_id, status, raw, reason, candidates, sentences, passage, tags, partners, created_at) VALUES (?, ${articleId}, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         tradingDay,
         p.raw,
         p.reason,
         JSON.stringify(p.candidates),
         JSON.stringify(p.sentences),
+        p.passage,
         JSON.stringify(p.tags),
         JSON.stringify(p.partners),
         created,

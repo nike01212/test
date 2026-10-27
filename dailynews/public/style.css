@@ -788,6 +788,11 @@ blockquote {
   overflow-wrap: anywhere;
 }
 
+/* memo 裡跟這檔有關的那一段，照原文分行 */
+blockquote.passage {
+  white-space: pre-line;
+}
+
 mark {
   background: var(--mark);
   color: inherit;
