@@ -71,6 +71,7 @@ test("App 推廣連結和推廣文字", () => {
   assert.ok(isPromoText("看更多經濟日報新聞，請下載經濟日報App："));
   assert.ok(isPromoText("加入經濟日報 LINE 好友"));
   assert.ok(isPromoText("分享自 Yahoo奇摩股市"));
+  assert.ok(isPromoText("「 全球財經 盡在鉅亨App： 」"));
   assert.ok(!isPromoText("台積電法說會釋出樂觀展望，AI 需求持續強勁"));
   // 很長的一行可能是內文，不當成推廣文字
   assert.ok(!isPromoText(`法人表示，${"市場".repeat(30)}，建議下載 App 追蹤`));

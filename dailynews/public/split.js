@@ -14,6 +14,10 @@ const LINE_MESSAGE = /^(?:上午|下午)?\d{1,2}:\d{2}\t[^\t\n]*\t/;
 const LINE_DATE = /^\d{4}[./]\d{1,2}[./]\d{1,2}(?:\s*[（(][^）)]{1,3}[）)]|\s+星期.)?$/;
 const LINE_HEADER = /^(?:\[LINE\]|儲存日期[:：]|Saved on:)/;
 
+// 從 LINE 電腦版選好幾則訊息複製的格式：時間 名字 訊息（空白隔開，也可能是 Tab），多行的訊息後面幾行沒有時間
+const COPY_LINE = /^(?:上午|下午)?\d{1,2}:\d{2}[ \t]+(?=\S)/;
+const NAME_MAX = 20; // LINE 的名字最多 20 個字
+
 function unquote(s) {
   const t = s.trim();
   return t.length >= 2 && t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1).replaceAll('""', '"') : t;
@@ -46,6 +50,50 @@ function lineMessages(text) {
     }
   }
   return messages.map((m) => unquote(m.join("\n")));
+}
+
+// 同一次貼上的內容裡，看得出名字在哪裡結束的：「名字 網址」「名字已收回訊息」。短的在前面
+function knownNames(heads) {
+  const names = new Set();
+  for (const head of heads) {
+    const m = /^(.+?)(?:[ \t]+https?:\/\/|已收回訊息\s*$)/.exec(head);
+    if (m && m[1].trim().length <= NAME_MAX) names.add(m[1].trim());
+  }
+  return [...names].sort((a, b) => a.length - b.length);
+}
+
+// 拿掉訊息第一行開頭的名字。名字可能有空白（「I’m 九孔 C」），先找上面認得的名字，認不得就拿掉第一個空白前的字
+function withoutName(head, names) {
+  const tab = /^[^\t]{1,20}\t/.exec(head);
+  if (tab) return head.slice(tab[0].length);
+  const name = names.find((n) => head === n || head.startsWith(`${n} `));
+  return name ? head.slice(name.length + 1) : head.replace(/^\S+\s*/, "");
+}
+
+// 是從 LINE 選好幾則訊息複製的就拆成一則一則訊息（每則是好幾行，第一行去掉時間和名字）；不是就回傳 null。
+// 第一行就是「時間 名字…」、至少兩行這樣開頭、而且有網址才算，自己寫的 memo 裡有「09:30 台積電法說會」這種行事曆不會被拆開
+function lineCopyMessages(text) {
+  const lines = text.split("\n");
+  const first = lines.find((l) => l.trim() && !LINE_DATE.test(l.trim()));
+  if (!first || !COPY_LINE.test(first)) return null;
+  if (lines.filter((l) => COPY_LINE.test(l)).length < 2 || findUrls(text).length === 0) return null;
+  const messages = [];
+  for (const line of lines) {
+    if (COPY_LINE.test(line)) messages.push([line.replace(COPY_LINE, "")]);
+    else if (messages.length && !LINE_DATE.test(line.trim())) messages[messages.length - 1].push(line);
+  }
+  const names = knownNames(messages.map((m) => m[0]));
+  return messages.map(([head, ...rest]) => [withoutName(head, names), ...rest]);
+}
+
+// LINE 轉貼的一則訊息：只收網址，每個網址一則，訊息裡其他的字當成它的說明（不管多長）；
+// 沒有網址的（已收回、閒聊、寫到個股的文字）整則略過，memo 要分開貼（2026/10/28 發起人決定）
+function copiedUrlItems(lines, stats) {
+  if (!lines.some((l) => findUrls(l).length)) {
+    stats.noUrl++;
+    return [];
+  }
+  return urlItems(readBlock(lines.filter((l) => l.trim()), stats));
 }
 
 // 一段（空白行隔開）裡的每一行：拿掉 App 推廣連結和推廣文字，記下文章網址
@@ -161,30 +209,32 @@ function splitChunk(text, stats) {
   return items;
 }
 
-// 主要入口：回傳 { items: [{ type: "url", url, rawUrl, note } | { type: "text", text }], promo, duplicates }
-// promo：拿掉幾個 App 推廣連結或推廣文字；duplicates：略過幾個重複的網址
+// 主要入口：回傳 { items: [{ type: "url", url, rawUrl, note } | { type: "text", text }], promo, duplicates, noUrl }
+// promo：拿掉幾個 App 推廣連結或推廣文字；duplicates：略過幾個重複的網址（同一篇幾個人分享都只留一則）；
+// noUrl：LINE 轉貼裡略過幾則沒有網址的訊息
 export function splitPaste(text) {
-  const stats = { promo: 0, duplicates: 0 };
+  const stats = { promo: 0, duplicates: 0, noUrl: 0 };
   const normalized = text.replace(/\r\n?/g, "\n").replace(/[​﻿]/g, "");
-  const chunks = lineMessages(normalized) ?? [normalized];
+  const copied = lineCopyMessages(normalized);
+  const found = copied
+    ? copied.flatMap((m) => copiedUrlItems(m, stats))
+    : (lineMessages(normalized) ?? [normalized]).flatMap((chunk) => splitChunk(chunk, stats));
   const items = [];
   const seen = new Set();
-  for (const chunk of chunks) {
-    for (const item of splitChunk(chunk, stats)) {
-      if (item.type === "url") {
-        if (seen.has(item.url)) {
-          stats.duplicates++;
-          continue;
-        }
-        seen.add(item.url);
-      } else {
-        item.text = item.text.trim();
-        if (!item.text) continue;
+  for (const item of found) {
+    if (item.type === "url") {
+      if (seen.has(item.url)) {
+        stats.duplicates++;
+        continue;
       }
-      items.push(item);
+      seen.add(item.url);
+    } else {
+      item.text = item.text.trim();
+      if (!item.text) continue;
     }
+    items.push(item);
   }
-  return { items, promo: stats.promo, duplicates: stats.duplicates };
+  return { items, promo: stats.promo, duplicates: stats.duplicates, noUrl: stats.noUrl };
 }
 
 // 文字改成網址類型時用：找出第一個文章網址，其餘文字另外回傳

@@ -1873,7 +1873,7 @@ function addPaste() {
     setResult(result, "請先貼上內容。圖片可以直接貼上、拖曳進來，或按「加入圖片」。", "bad");
     return;
   }
-  const { items, promo, duplicates } = splitPaste(box.value);
+  const { items, promo, duplicates, noUrl } = splitPaste(box.value);
   let skipped = duplicates;
   const added = [];
   for (const fields of items) {
@@ -1892,6 +1892,7 @@ function addPaste() {
   ];
   if (promo) notes.push(`拿掉 ${promo} 個 App 推廣文字或連結`);
   if (skipped) notes.push(`略過 ${skipped} 個重複的網址`);
+  if (noUrl) notes.push(`略過 ${noUrl} 則沒有網址的訊息`);
   setResult(result, `${notes.join("，")}。${added.length ? "請確認下面的預覽再送出。" : ""}`, added.length ? "ok" : "bad");
   setResult($("preview-result"), "");
   renderPreview();
