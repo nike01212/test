@@ -92,6 +92,9 @@ export function buildMatcher(stocksData, rules = {}) {
   const lengthsByFirstChar = new Map(); // 第一個字 → 可能的長度（由長到短，用來找最長的名稱）
   const keysByCode = new Map(); // 代號 → 所有名稱（標示原文用）
   const formerByCode = new Map(); // 代號 → 已經併進這一家的舊公司名稱（name-rules.json 的 merged）
+  // 興櫃股：代號 → 名稱。不比對；寫了代號的（「宏偉電機（4565）」）不當待確認，另外列出來，
+  // 預覽上直接寫「4565 宏偉是興櫃股，不符合條件，不能加入」（2026/10/28 發起人要求）
+  const emerging = new Map(stocksData.emerging ?? []);
 
   function register(key, tier) {
     let e = dict.get(key);
@@ -206,15 +209,23 @@ export function buildMatcher(stocksData, rules = {}) {
     return s ? `${s.code} ${s.name}` : code;
   }
 
-  // 主要入口：回傳 { title, mentions: [{ status: "ok", code, sentences } | { status: "pending", raw, reason, candidates, sentences }] }。
+  // 主要入口：回傳 { title, mentions: [{ status: "ok", code, sentences } | { status: "pending", raw, reason, candidates, sentences }],
+  // emerging: [{ code, name }] }。emerging 是寫了代號的興櫃股，不算個股、不會送出，只在預覽上告訴使用者不能加入。
   // 每個 mention 另外有 spans：在原文裡出現的位置 [開始, 結束]，給標籤判斷用（public/tagger.js），不會送到伺服器
   function analyze(text) {
     const norm = normalize(text);
     const ranges = sentenceRanges(norm);
-    const nameTokens = scanNames(norm);
     const codeTokens = scanCodes(norm);
+    // 興櫃股的名稱緊接著它的代號（「特力屋(7867)」「宏碁創達(7706)」）：名稱裡的「特力」「宏碁」不算上市櫃股
+    const emergingNames = codeTokens.flatMap((c) => {
+      const name = emerging.has(c.code) ? normalize(emerging.get(c.code)) : "";
+      const before = norm.slice(0, c.start).trimEnd();
+      return name && before.endsWith(name) ? [[before.length - name.length, c.start]] : [];
+    });
+    const nameTokens = scanNames(norm).filter((t) => !emergingNames.some(([s, e]) => t.start >= s && t.end <= e));
     const usedCodes = new Set();
     const hits = []; // 依出現順序
+    const emergingHits = []; // 興櫃股：{ pos, code }
 
     for (const t of nameTokens) {
       const e = t.entry;
@@ -226,6 +237,11 @@ export function buildMatcher(stocksData, rules = {}) {
       const confirming = [adj?.code, ...bareAdjacentCode(norm, t)].find((c) => c && e.codes.has(c));
       if (confirming) {
         hits.push({ pos: t.start, len: t.end - t.start, status: "ok", code: confirming });
+        continue;
+      }
+      // 名稱旁邊的代號是興櫃股：以代號為準，當成興櫃股，不算這個名稱的上市櫃股
+      if (adj && emerging.has(adj.code)) {
+        emergingHits.push({ pos: t.start, code: adj.code });
         continue;
       }
       if (adj && !e.ignore) {
@@ -274,6 +290,8 @@ export function buildMatcher(stocksData, rules = {}) {
       if (usedCodes.has(c)) continue;
       if (stocks.has(c.code)) {
         hits.push({ pos: c.start, len: c.end - c.start, status: "ok", code: c.code });
+      } else if (emerging.has(c.code)) {
+        emergingHits.push({ pos: c.start, code: c.code });
       } else {
         // 把括號前面幾個字一起顯示，比較看得出在講哪一家
         const before = /[\p{L}\p{N}-]{0,6}$/u.exec(text.slice(Math.max(0, c.start - 6), c.start))?.[0] ?? "";
@@ -326,7 +344,13 @@ export function buildMatcher(stocksData, rules = {}) {
         pending.delete(key);
       }
     }
-    return { title: makeTitle(text), mentions: [...confirmed.values(), ...pending.values()] };
+    emergingHits.sort((a, b) => a.pos - b.pos);
+    const emergingCodes = [...new Set(emergingHits.map((x) => x.code))];
+    return {
+      title: makeTitle(text),
+      mentions: [...confirmed.values(), ...pending.values()],
+      emerging: emergingCodes.map((code) => ({ code, name: emerging.get(code) })),
+    };
   }
 
   // 待確認改成其他個股、手動加到延續性觀察時的搜尋：代號開頭，或名稱、別名包含輸入的字

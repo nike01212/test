@@ -3,6 +3,7 @@
 //
 // 資料來源：
 // - 代號與簡稱：證交所 ISIN 一覽表（上市 strMode=2、上櫃 strMode=4），只取「股票」與「創新板」
+// - 興櫃股的代號與簡稱：ISIN 一覽表（興櫃 strMode=5）。不比對，只用來在待確認寫出「代號 4565（宏偉）是興櫃股」
 // - 公司全名（用來產生別名）：證交所 OpenAPI t187ap03_L、櫃買中心 OpenAPI mopsfin_t187ap03_O
 // - 休市日：證交所「市場開休市日期」
 
@@ -13,6 +14,7 @@ const OUT_DIR = new URL("../public/data/", import.meta.url);
 const ISIN = {
   上市: "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
   上櫃: "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4",
+  興櫃: "https://isin.twse.com.tw/isin/C_public.jsp?strMode=5",
 };
 const COMPANY_API = {
   上市: "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
@@ -45,7 +47,8 @@ async function loadIsin(market) {
       category = cells[0];
       continue;
     }
-    if (cells.length < 6 || !STOCK_CATEGORIES.has(category)) continue;
+    // 興櫃一覽表沒有分類那一列，整頁都是興櫃股票
+    if (cells.length < 6 || (market !== "興櫃" && !STOCK_CATEGORIES.has(category))) continue;
     const [code, name] = cells[0].split("　").map((s) => s.trim());
     if (!/^\d{4}$/.test(code) || !name) continue;
     stocks.push({ code, name, market });
@@ -127,11 +130,23 @@ async function buildStocks() {
   }
   if (stocks.length < 1500) throw new Error(`只抓到 ${stocks.length} 檔，可能是來源格式變了，先不覆蓋舊檔`);
   stocks.sort((a, b) => a[0].localeCompare(b[0]));
+
+  // 興櫃股不比對（很多名稱是一般用語，例如相互、開展、台視、悠遊卡），只用來寫待確認的說明（2026/10/28 發起人決定）
+  const listed = new Set(stocks.map((s) => s[0]));
+  const emerging = (await loadIsin("興櫃"))
+    .filter((s) => !listed.has(s.code))
+    .map((s) => [s.code, s.name.replace(/[*＊]/g, "")]);
+  console.log(`興櫃：${emerging.length} 檔`);
+  if (emerging.length < 100) throw new Error(`興櫃只抓到 ${emerging.length} 檔，可能是來源格式變了，先不覆蓋舊檔`);
+  emerging.sort((a, b) => a[0].localeCompare(b[0]));
+
   return {
     updated: new Date().toISOString().slice(0, 10),
     sources: [...Object.values(ISIN), ...Object.values(COMPANY_API)],
     // 每一筆：[代號, 名稱, 市場, 別名]
     stocks,
+    // 興櫃股，每一筆：[代號, 名稱]
+    emerging,
   };
 }
 

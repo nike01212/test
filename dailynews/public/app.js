@@ -1260,8 +1260,9 @@ function itemState(item) {
   const { analysis, found } = item.cache;
   if (analysis.mentions.length === 0) {
     // 全部拿掉的留在預覽裡，不送出也不自動清掉（2026/10/26 發起人決定）
-    if (found) return { kind: "emptied", message: "個股都拿掉了，這則不會送出。不要的話按這則的「刪除」。" };
-    return { kind: "none", message: "沒有找到個股，送出時會略過。" };
+    const { emerging } = analysis;
+    if (found) return { kind: "emptied", message: "個股都拿掉了，這則不會送出。不要的話按這則的「刪除」。", emerging };
+    return { kind: "none", message: "沒有找到個股，送出時會略過。", emerging };
   }
   // 改標籤改到一半先不送，免得勾好的沒有按「完成」就送出去
   if (item.labelEdit) return { kind: "editing", analysis };
@@ -1466,7 +1467,20 @@ function imageBody(item) {
 
 // 找到的個股，加上展開的待確認選項（打字時只重畫這一塊）
 function foundLine(item, st) {
-  return h("div", { class: "found-block" }, foundChips(item, st), st.analysis ? pendingPanel(item, st.analysis) : null);
+  return h(
+    "div",
+    { class: "found-block" },
+    foundChips(item, st),
+    emergingNote(st.analysis?.emerging ?? st.emerging),
+    st.analysis ? pendingPanel(item, st.analysis) : null,
+  );
+}
+
+// 寫了代號的興櫃股：不給待確認的選項，直接說不能加入（2026/10/28 發起人要求）
+function emergingNote(list) {
+  if (!list?.length) return null;
+  const names = list.map((s) => `${s.code} ${s.name}`).join("、");
+  return h("p", { class: "found bad" }, `${names}是興櫃股，不符合條件，不能加入`);
 }
 
 function foundChips(item, st) {

@@ -79,6 +79,43 @@ test("清單裡沒有的代號 → 待確認", () => {
   assert.equal(p.length, 1);
   assert.match(p[0].raw, /0050/);
   assert.deepEqual(p[0].candidates, []);
+  assert.equal(p[0].reason, "代號 0050 不在上市櫃清單裡（可能是 ETF、興櫃或剛上市）");
+});
+
+test("改名的公司，新聞寫舊簡稱也對得到（2072 世紀風電 → 世紀能源）", () => {
+  assert.deepEqual(okCodes(matcher.analyze("世紀風電、世紀能源")), ["2072"]);
+});
+
+test("興櫃股：不當待確認，另外列出來說不能加入（2026/10/28 宏偉電機）", async () => {
+  // 工商時報 2026/10/28「半導體擴廠潮 宏偉在手訂單翻倍」的第一段；Yahoo 股市寫「宏偉(4565.TWO)」
+  for (const text of ["工業用電梯製造商宏偉電機（4565）在手訂單規模較過往翻倍增長", "宏偉(4565.TWO) 技術分析"]) {
+    const r = matcher.analyze(text);
+    assert.deepEqual(r.mentions, [], text);
+    assert.deepEqual(r.emerging, [{ code: "4565", name: "宏偉" }], text);
+  }
+  // 出現好幾次只列一次；和上市櫃股寫在一起，上市櫃股照舊
+  const r = matcher.analyze("宏偉(4565)接單，宏偉(4565)擴產；台積電(2330)、盛新(6930)");
+  assert.deepEqual(okCodes(r), ["2330"]);
+  assert.deepEqual(pendings(r), []);
+  assert.deepEqual(r.emerging, [{ code: "4565", name: "宏偉" }, { code: "6930", name: "盛新" }]);
+  // 名稱是上市櫃股、旁邊的代號是興櫃股：以代號為準，當成興櫃股
+  const c = matcher.analyze("宏碁(7706)");
+  assert.deepEqual(c.mentions, []);
+  assert.deepEqual(c.emerging, [{ code: "7706", name: "宏碁創達" }]);
+  // 興櫃股的名稱緊接著它的代號：名稱開頭是上市櫃股的（特力屋的「特力」、宏碁創達的「宏碁」），上市櫃股不算
+  for (const [code, name] of (await load("stocks.json")).emerging) {
+    for (const text of [`${name}(${code})`, `${name} (${code})`]) {
+      const x = matcher.analyze(text);
+      assert.deepEqual(x.mentions, [], text);
+      assert.deepEqual(x.emerging, [{ code, name }], text);
+    }
+  }
+  assert.deepEqual(okCodes(matcher.analyze("特力屋(7867)，特力股價")), ["2908"]); // 後面另外寫的「特力」照算
+  // 興櫃股不比對名稱，也搜尋不到；不在清單、也不是興櫃的代號照舊是待確認
+  assert.deepEqual(matcher.analyze("宏偉電機在手訂單翻倍").mentions, []);
+  assert.deepEqual(matcher.analyze("宏偉電機在手訂單翻倍").emerging, []);
+  assert.deepEqual(matcher.search("4565"), []);
+  assert.deepEqual(matcher.analyze("元大台灣50(0050)").emerging, []);
 });
 
 test("英文別名要整個字對上", () => {
