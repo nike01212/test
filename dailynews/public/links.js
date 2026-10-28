@@ -178,7 +178,8 @@ export function isFetchable(url) {
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return false;
   if (u.port && u.port !== "80" && u.port !== "443") return false;
-  const host = u.hostname;
+  // 結尾多一個點（localhost.）是同一個主機的完整寫法，拿掉再檢查（2026/10/28 測試找到）
+  const host = u.hostname.replace(/\.+$/, "");
   if (host.startsWith("[") || /^[\d.]+$/.test(host)) return false;
   if (!host.includes(".")) return false;
   return !/(?:^|\.)(?:localhost|local|internal|lan|home|arpa)$/.test(host);

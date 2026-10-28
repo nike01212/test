@@ -94,15 +94,31 @@ export function buildTagger(tagsConfig = {}, companiesConfig = {}) {
   }
 
   // 幫 matcher.analyze 找到的每一檔貼上標籤和合作對象（回傳新的陣列，多了 tags、partners）。
-  // 只提到一檔：整則內容都算它的。提到好幾檔：只看提到那一檔的段落（一行或一個段落），
-  // 券商 memo 一行一檔，才不會把別檔的「調升目標價」貼到這檔上
-  function tagMentions(text, mentions) {
+  // 只提到一檔（也沒有寫到興櫃股）：整則內容都算它的。提到好幾檔：每檔只看跟它有關的內容，
+  // 券商 memo 一行一檔，才不會把別檔的「調升目標價」貼到這檔上：
+  // - 有 sections（文字類 memo 每檔那一段的切法，public/passage.js 的 sections）：那一段只提到這一檔，整段都算它的
+  //   （外電整理「- 2327國巨:」底下那行說明，2026/10/28 發起人決定）；同一段還有別檔（含待確認、others 的興櫃股），
+  //   只看寫到它的那幾行，內容是不是在講它分不清楚，寧可少貼
+  // - 沒有 sections（網址、圖片）：只看寫到它的那幾行
+  // others：別家公司在原文裡的位置（matcher.analyze 的 emergingSpans），不貼標籤，只用來判斷那一段是不是只有這一檔
+  function tagMentions(text, mentions, { sections = null, others = [] } = {}) {
     const norm = normalize(String(text ?? ""));
-    const lines = mentions.length > 1 ? lineRanges(norm) : [];
+    const whole = mentions.length === 1 && others.length === 0;
+    const lines = whole ? [] : lineRanges(norm);
+    const overlaps = (spans, [s, e]) => spans.some(([a, b]) => a < e && b > s);
     const cache = new Map();
     return mentions.map((m) => {
       const spans = list(m.spans);
-      const picked = lines.filter(([s, e]) => spans.some(([a, b]) => a < e && b > s));
+      const linesIn = ([from, to]) => lines.filter((l) => l[0] >= from && l[1] <= to && overlaps(spans, l));
+      let picked = linesIn([0, norm.length]);
+      if (sections && !whole) {
+        picked = sections
+          .filter((sec) => overlaps(spans, sec))
+          .flatMap((sec) => {
+            const shared = overlaps(others, sec) || mentions.some((o) => o !== m && overlaps(list(o.spans), sec));
+            return shared ? linesIn(sec) : [sec];
+          });
+      }
       const context = picked.length ? picked.map(([s, e]) => norm.slice(s, e)).join("\n") : norm;
       let found = cache.get(context);
       if (!found) {

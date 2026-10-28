@@ -13,6 +13,10 @@ const TITLE_LENGTH = 60;
 const BRACKET_CODE = /\(\s*(\d{4})\s*(?:[.-]?\s*(?:TWO|TW|TT))?\s*\)/g;
 // 2330.TW、6488.TWO
 const SUFFIX_CODE = /(?<![\d.])(\d{4})\.(?:TWO|TW)(?![A-Z])/g;
+// 括號裡的年份：台灣的財經新聞常寫「今(2026)年」「去(2025)年」「明年(2027)」，2025 千興、2027 大成鋼這些代號剛好是年份
+// （2026/10/28 測試找到）。括號裡只有 19xx、20xx，前面是今去明前後同隔翌年、或後面緊接「年」，就當成年份
+const YEAR_IN_BRACKET = /^\(\s*(?:19|20)\d{2}\s*\)$/;
+const YEAR_BEFORE = /[今去明前後同隔翌年]$/;
 
 // 名稱的優先順序：手動別名 > 官方簡稱 > 由全名產生的別名
 const TIER_MANUAL = 0;
@@ -92,7 +96,8 @@ export function buildMatcher(stocksData, rules = {}) {
   const lengthsByFirstChar = new Map(); // 第一個字 → 可能的長度（由長到短，用來找最長的名稱）
   const keysByCode = new Map(); // 代號 → 所有名稱（標示原文用）
   const formerByCode = new Map(); // 代號 → 已經併進這一家的舊公司名稱（name-rules.json 的 merged）
-  // 興櫃股：代號 → 名稱。不比對；寫了代號的（「宏偉電機（4565）」）不當待確認，另外列出來，
+  // 興櫃股：代號 → 名稱。名稱不比對（名稱裡有上市櫃股名稱的例外，見下面的 emergingKeys）；
+  // 寫了代號的（「宏偉電機（4565）」）不當待確認，另外列出來，
   // 預覽上直接寫「4565 宏偉是興櫃股，不符合條件，不能加入」（2026/10/28 發起人要求）
   const emerging = new Map(stocksData.emerging ?? []);
 
@@ -152,6 +157,15 @@ export function buildMatcher(stocksData, rules = {}) {
   for (const word of rules.ignore ?? []) {
     register(normalize(word), TIER_IGNORE_ONLY).ignore = true;
   }
+  // 興櫃股的名稱裡有上市櫃股的名稱（「特力屋」裡的「特力」、「宏碁創達」裡的「宏碁」，366 檔裡有 19 檔）：
+  // 沒寫代號也整個名稱當成興櫃股，裡面的字不算上市櫃股（2026/10/28 發起人要求）。
+  // 其他興櫃名稱照舊不比對（很多是一般用語，例如相互、開展、公信）
+  const emergingKeys = [...emerging].flatMap(([code, name]) => {
+    const key = normalize(name).replace(/\s+/g, "");
+    const hasListed = scanNames(key).some((t) => t.entry.codes.size && !t.entry.ignore);
+    return key.length >= 2 && !dict.has(key) && hasListed ? [[key, code]] : [];
+  });
+  for (const [key, code] of emergingKeys) register(key, TIER_IGNORE_ONLY).emerging = code;
 
   // 從左到右，每個位置找最長的名稱
   function scanNames(norm) {
@@ -178,7 +192,11 @@ export function buildMatcher(stocksData, rules = {}) {
   function scanCodes(norm) {
     const tokens = [];
     for (const re of [BRACKET_CODE, SUFFIX_CODE]) {
-      for (const m of norm.matchAll(re)) tokens.push({ start: m.index, end: m.index + m[0].length, code: m[1] });
+      for (const m of norm.matchAll(re)) {
+        const end = m.index + m[0].length;
+        const year = YEAR_IN_BRACKET.test(m[0]) && (YEAR_BEFORE.test(norm.slice(0, m.index)) || norm[end] === "年");
+        tokens.push({ start: m.index, end, code: m[1], year });
+      }
     }
     return tokens;
   }
@@ -210,7 +228,7 @@ export function buildMatcher(stocksData, rules = {}) {
   }
 
   // 主要入口：回傳 { title, mentions: [{ status: "ok", code, sentences } | { status: "pending", raw, reason, candidates, sentences }],
-  // emerging: [{ code, name }] }。emerging 是寫了代號的興櫃股，不算個股、不會送出，只在預覽上告訴使用者不能加入。
+  // emerging: [{ code, name }], emergingSpans }。emerging 是寫了代號的興櫃股（和名稱裡有上市櫃股名稱的興櫃股，例如特力屋），不算個股、不會送出，只在預覽上告訴使用者不能加入。
   // 每個 mention 另外有 spans：在原文裡出現的位置 [開始, 結束]，給標籤判斷用（public/tagger.js），不會送到伺服器
   function analyze(text) {
     const norm = normalize(text);
@@ -225,13 +243,13 @@ export function buildMatcher(stocksData, rules = {}) {
     const nameTokens = scanNames(norm).filter((t) => !emergingNames.some(([s, e]) => t.start >= s && t.end <= e));
     const usedCodes = new Set();
     const hits = []; // 依出現順序
-    const emergingHits = []; // 興櫃股：{ pos, code }
+    const emergingHits = []; // 興櫃股：{ pos, len, code }
 
     for (const t of nameTokens) {
       const e = t.entry;
       const raw = text.slice(t.start, t.end);
       const codes = [...e.codes];
-      const adj = adjacentCodeToken(norm, t, codeTokens, usedCodes);
+      let adj = adjacentCodeToken(norm, t, codeTokens, usedCodes);
       if (adj) usedCodes.add(adj);
 
       const confirming = [adj?.code, ...bareAdjacentCode(norm, t)].find((c) => c && e.codes.has(c));
@@ -239,9 +257,20 @@ export function buildMatcher(stocksData, rules = {}) {
         hits.push({ pos: t.start, len: t.end - t.start, status: "ok", code: confirming });
         continue;
       }
+      // 括號裡的年份只有緊接著的名稱就是那一檔時才算代號（「大成鋼(2027)」），其他當作旁邊沒有代號
+      if (adj?.year) {
+        usedCodes.delete(adj);
+        adj = null;
+      }
+      // 沒寫代號的興櫃股名稱（「特力屋」）：當成興櫃股，旁邊的代號讓代號自己決定
+      if (e.emerging) {
+        if (adj) usedCodes.delete(adj);
+        emergingHits.push({ pos: t.start, len: t.end - t.start, code: e.emerging });
+        continue;
+      }
       // 名稱旁邊的代號是興櫃股：以代號為準，當成興櫃股，不算這個名稱的上市櫃股
       if (adj && emerging.has(adj.code)) {
-        emergingHits.push({ pos: t.start, code: adj.code });
+        emergingHits.push({ pos: Math.min(t.start, adj.start), len: Math.max(t.end, adj.end) - Math.min(t.start, adj.start), code: adj.code });
         continue;
       }
       if (adj && !e.ignore) {
@@ -287,11 +316,11 @@ export function buildMatcher(stocksData, rules = {}) {
     }
 
     for (const c of codeTokens) {
-      if (usedCodes.has(c)) continue;
+      if (usedCodes.has(c) || c.year) continue;
       if (stocks.has(c.code)) {
         hits.push({ pos: c.start, len: c.end - c.start, status: "ok", code: c.code });
       } else if (emerging.has(c.code)) {
-        emergingHits.push({ pos: c.start, code: c.code });
+        emergingHits.push({ pos: c.start, len: c.end - c.start, code: c.code });
       } else {
         // 把括號前面幾個字一起顯示，比較看得出在講哪一家
         const before = /[\p{L}\p{N}-]{0,6}$/u.exec(text.slice(Math.max(0, c.start - 6), c.start))?.[0] ?? "";
@@ -350,6 +379,8 @@ export function buildMatcher(stocksData, rules = {}) {
       title: makeTitle(text),
       mentions: [...confirmed.values(), ...pending.values()],
       emerging: emergingCodes.map((code) => ({ code, name: emerging.get(code) })),
+      // 興櫃股在原文裡出現的位置：標籤判斷時當成「別家公司」，同一段有興櫃股就不整段算給上市櫃股（public/tagger.js）
+      emergingSpans: emergingHits.map((x) => [x.pos, x.pos + x.len]),
     };
   }
 

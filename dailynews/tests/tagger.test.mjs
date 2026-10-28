@@ -47,6 +47,27 @@ test("一則提到好幾檔：每檔只看提到它的段落", () => {
   }
 });
 
+test("文字類給了每檔那一段的切法（sections）：那一段只有這一檔就整段算它的，有別檔、待確認、興櫃股就只看寫到它的那幾行", () => {
+  const text = "- 甲公司\n報價上揚\n\n- 乙公司、丙公司\n乙擴產\n丙接獲新訂單\n\n- 丁公司\n宏偉接獲新訂單";
+  const at = (word) => [text.indexOf(word), text.indexOf(word) + word.length];
+  const mentions = [
+    { status: "ok", code: "A", spans: [at("甲公司")] },
+    { status: "ok", code: "B", spans: [at("乙公司"), at("乙擴產")] },
+    { status: "pending", raw: "丙", spans: [at("丙公司")] },
+    { status: "ok", code: "D", spans: [at("丁公司")] },
+  ];
+  const sections = [[0, text.indexOf("\n\n")], [text.indexOf("- 乙"), text.indexOf("\n\n- 丁")], [text.indexOf("- 丁"), text.length]];
+  const others = [at("宏偉")]; // 興櫃股
+  const tagged = tagger.tagMentions(text, mentions, { sections, others });
+  assert.deepEqual(tagged.map((m) => m.tags), [["漲價"], ["擴產"], [], []]);
+  // 沒給 sections（網址、圖片）照舊只看寫到它的那幾行
+  assert.deepEqual(tagger.tagMentions(text, mentions).map((m) => m.tags), [[], ["擴產"], [], []]);
+  // 只有一檔、也沒有興櫃股：整則都算它的；有興櫃股就不是
+  const one = [{ status: "ok", code: "A", spans: [at("甲公司")] }];
+  assert.deepEqual(tagger.tagMentions(text, one)[0].tags, ["漲價", "新訂單", "擴產"]);
+  assert.deepEqual(tagger.tagMentions(text, one, { sections, others })[0].tags, ["漲價"]);
+});
+
 test("一則只提到一檔：整則內容都算（後面沒寫名稱的段落也算）", () => {
   const [m] = analyze("國巨(2327)9月營收創新高\n公司表示，AI伺服器訂單強勁，產能滿載，明年擴產。\n主要客戶包括蘋果、特斯拉。");
   // 「訂單強勁」講的是既有訂單，不算新訂單；「公司表示」是 6人說

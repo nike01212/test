@@ -236,7 +236,8 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   let tradingDay = assignTradingDay(now, calendar).tradingDay;
   if (body.tradingDay !== undefined && body.tradingDay !== null) {
     if (!isIsoDate(body.tradingDay)) return badRequest("日期格式要像 2026-10-23");
-    tradingDay = body.tradingDay;
+    // 指定到休市日（週末、颱風假）就歸下一個開盤日，那天的清單平常看不到（2026/10/28 發起人決定）
+    tradingDay = openDayOf(body.tradingDay, calendar);
   }
   const title = cleanText(body.title, MAX_TITLE_LENGTH) || "（沒有標題）";
   let url: string | null = null;
@@ -339,22 +340,23 @@ async function handleCreateArticle(request: Request, env: Env): Promise<Response
   return json({ id, tradingDay, confirmed: confirmed.size, pending: pending.length }, 201);
 }
 
-// PATCH /api/articles/:id：改所屬交易日（例如颱風假臨時休市）
+// PATCH /api/articles/:id：改所屬交易日（例如颱風假臨時休市）。選到休市日就移到下一個開盤日（2026/10/28 發起人決定）
 async function handleMoveArticle(request: Request, env: Env, id: number): Promise<Response> {
   const body = await readJson(request);
   if (!body || !isIsoDate(body.tradingDay)) return badRequest("日期格式要像 2026-10-23");
+  const tradingDay = openDayOf(body.tradingDay, calendar);
   let moved: D1Result;
   try {
     [moved] = await env.DB.batch([
-      env.DB.prepare("UPDATE articles SET trading_day = ? WHERE id = ?").bind(body.tradingDay, id),
-      env.DB.prepare("UPDATE mentions SET trading_day = ? WHERE article_id = ?").bind(body.tradingDay, id),
+      env.DB.prepare("UPDATE articles SET trading_day = ? WHERE id = ?").bind(tradingDay, id),
+      env.DB.prepare("UPDATE mentions SET trading_day = ? WHERE article_id = ?").bind(tradingDay, id),
     ]);
   } catch (err) {
     if (isDuplicateUrl(err)) return json({ error: "那天已經有同一篇了", duplicate: true }, 409);
     throw err;
   }
   if (!moved.meta.changes) return json({ error: "找不到這一則" }, 404);
-  return json({ ok: true, tradingDay: body.tradingDay });
+  return json({ ok: true, tradingDay });
 }
 
 // DELETE /api/articles/:id：整則刪掉，連同它對到的個股

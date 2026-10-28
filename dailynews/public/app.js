@@ -18,7 +18,7 @@ import {
 import { decodeHtml, extractArticle, MIN_BODY } from "/extract.js";
 import { isPersistent, loadCodes, loadMitakeList, pruneOld, saveCodes, saveMitakeList } from "/marks.js";
 import { recognize } from "/ocr.js";
-import { withPassages } from "/passage.js";
+import { sections, withPassages } from "/passage.js";
 import { extractUrl, splitPaste } from "/split.js";
 import { buildTagger, describeLabels, mergeChange } from "/tagger.js";
 import { uncheckedCount, watchItems } from "/watch.js";
@@ -42,6 +42,7 @@ const state = {
   labelEdit: null, // 正在改標籤的那一檔：{ code, base: { tags, partners }, tags: Set, partners: Set }
   deleting: null, // 選取刪除：選了哪些代號（Set）；null 是平常（2026/10/27 發起人同意的設計）
   pasteDay: null, // 手動改的「會歸到」日期；null 代表照規則
+  pasteDayNote: "", // 手動選到休市日、改成下一個開盤日時的說明
   // 自己選的那一頁（‹ ›、日期框、網址帶 ?date=、送出後跳過去的）；null 是今日清單，
   // 或頁面放著過了 09:00 自己變成前一天的那頁（不是自己選的）
   chosenDate: null,
@@ -1121,7 +1122,7 @@ function renderPasteDay() {
   const page = pageDay();
   $("paste-day").textContent = formatDate(targetDay());
   const notes = [];
-  if (state.pasteDay) notes.push("（手動指定）");
+  if (state.pasteDay) notes.push(`（手動指定${state.pasteDayNote ? `；${state.pasteDayNote}` : ""}）`);
   else if (page === state.data.date) notes.push("（你正在看這一天的清單）");
   else if (page) notes.push(`（你正在看 ${shortDate(state.data.date)}，那天沒開盤，歸到下一個開盤日）`);
   else if (today.missingYears.length) notes.push(`（${today.missingYears.join("、")} 年休市行事曆還沒公布，只排除週末）`);
@@ -1252,7 +1253,11 @@ function itemState(item) {
     // 文字類（memo）每檔另外存跟它有關的那一段（2026/10/27 發起人要求）
     if (item.type === "text") analysis.mentions = withPassages(content, analysis.mentions);
     if (state.tagger) {
-      analysis.mentions = state.tagger.tagMentions(content, analysis.mentions);
+      // 文字類：那一段只提到這一檔就整段算它的，同一段有別檔（含興櫃股）只看寫到它的那幾行（2026/10/28 發起人決定）
+      analysis.mentions = state.tagger.tagMentions(content, analysis.mentions, {
+        sections: item.type === "text" ? sections(content) : null,
+        others: analysis.emergingSpans,
+      });
       if (item.labelChange) analysis.mentions = state.tagger.applyChange(analysis.mentions, item.labelChange);
     }
     item.cache = { content, tagger: state.tagger, edits, found, analysis };
@@ -1964,8 +1969,9 @@ async function submitPreview() {
   if (preview.items.length === 0) $("paste-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function setPasteDay(day) {
+function setPasteDay(day, note = "") {
   state.pasteDay = day;
+  state.pasteDayNote = day ? note : "";
   const input = $("paste-day-input");
   input.hidden = true;
   renderPasteDay();
@@ -2054,12 +2060,26 @@ async function resolvePending(g, code) {
 
 async function moveArticle(a, date) {
   if (date === state.date) return;
-  if (!confirm(`把「${a.title}」移到 ${formatDate(date)}？`)) return render();
   await run(async () => {
-    await api(`/api/articles/${a.id}`, { method: "PATCH", body: { tradingDay: date } });
-    toast(`已移到 ${formatDate(date)}`);
+    const { day, note } = await openDayFor(date);
+    if (day === state.date) {
+      toast(`${note}，就是現在這一天，沒有移動`);
+      return render();
+    }
+    if (!confirm(`${note ? `${note}。\n` : ""}把「${a.title}」移到 ${formatDate(day)}？`)) return render();
+    const res = await api(`/api/articles/${a.id}`, { method: "PATCH", body: { tradingDay: day } });
+    toast(`已移到 ${formatDate(res.tradingDay)}`);
     await loadList(state.date);
   });
+}
+
+// 日期框選到休市日（週末、颱風假）就改成下一個開盤日，那天的清單平常看不到（2026/10/28 發起人決定；伺服器也會再改一次）。
+// 回傳 { day, note }，有開盤的 note 是空的
+async function openDayFor(date) {
+  const r = await api(`/api/trading-day?at=${date}T00:00`);
+  if (r.rule !== "closed") return { day: date, note: "" };
+  const why = /^週[六日]$/.test(r.closedReason) ? "沒開盤" : r.closedReason;
+  return { day: r.tradingDay, note: `${shortDate(date)}${why}，改成下一個開盤日` };
 }
 
 async function deleteArticle(a) {
@@ -2202,7 +2222,12 @@ $("paste-day-change").addEventListener("click", () => {
   input.focus();
 });
 $("paste-day-input").addEventListener("change", (e) => {
-  if (e.target.value) setPasteDay(e.target.value);
+  const value = e.target.value;
+  if (!value) return;
+  run(async () => {
+    const { day, note } = await openDayFor(value);
+    setPasteDay(day, note);
+  });
 });
 $("prev-day").addEventListener("click", () => state.data?.prevDate && run(() => loadList(state.data.prevDate, { choose: true })));
 $("next-day").addEventListener("click", () => state.data?.nextDate && run(() => loadList(state.data.nextDate, { choose: true })));
