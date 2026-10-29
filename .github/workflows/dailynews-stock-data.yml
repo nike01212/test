@@ -1,0 +1,34 @@
+# dailynews 代號清單每天自動更新（2026/10/29）：從證交所、櫃買中心抓上市、上櫃、興櫃的代號一覽表，
+# 傳到網站的 /api/stock-data 存進資料庫，網站馬上就用新的清單，不用重新部署（dailynews/src/stocks.ts）。
+#
+# 要先設定（在 GitHub 這個專案的 Settings → Secrets and variables → Actions）：
+# - Secret   STOCK_UPLOAD_TOKEN：和網站的 wrangler secret STOCK_UPLOAD_TOKEN 同一個值
+# - Variable STOCK_UPLOAD_SITES：要傳到哪些網站，逗號隔開（先只放測試站，發起人確認後再加正式站）
+#
+# 在 Actions 頁面也可以按「Run workflow」馬上跑一次。
+# 注意：GitHub 在這個專案 60 天沒有新的 commit 時會自動停掉排程，網頁最下面會寫「超過 7 天沒自動更新了」，
+# 到 Actions 頁面這個 workflow 按「Enable workflow」就好。
+name: dailynews 代號清單更新
+on:
+  schedule:
+    # 台北時間週一到週五 07:00（UTC 前一天 23:00），開盤前。GitHub 的排程常常晚幾分鐘到幾十分鐘
+    - cron: "0 23 * * 0-4"
+  workflow_dispatch:
+concurrency: dailynews-stock-data
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: dailynews
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 抓代號清單、傳到網站
+        env:
+          STOCK_UPLOAD_TOKEN: ${{ secrets.STOCK_UPLOAD_TOKEN }}
+          STOCK_UPLOAD_SITES: ${{ vars.STOCK_UPLOAD_SITES }}
+        run: node scripts/update-data.mjs --upload "$STOCK_UPLOAD_SITES"

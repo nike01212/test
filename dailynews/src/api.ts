@@ -4,7 +4,7 @@ import { calendar } from "./calendar";
 import { checkCloses, isAfterClose, MANUAL_COOLDOWN_SECONDS } from "./closing";
 import { handleFetch } from "./fetchPage";
 import { json, readJson } from "./http";
-import { findStock } from "./stocks";
+import { findStock, loadStocks } from "./stocks";
 import { countStreaks, MAX_STREAK } from "./streak";
 import {
   addDays,
@@ -534,6 +534,7 @@ export async function pruneOldBodies(env: Env, nowMs = Date.now()): Promise<{ be
 export async function handleApi(request: Request, env: Env, url: URL): Promise<Response | null> {
   const path = url.pathname;
   const method = request.method;
+  await loadStocks(env.DB); // 每天自動更新的代號清單（src/stocks.ts）
 
   if (path === "/api/trading-day" && method === "GET") return handleTradingDay(url);
   if (path === "/api/list" && method === "GET") return handleList(url, env);

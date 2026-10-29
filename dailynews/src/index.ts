@@ -14,6 +14,7 @@ import {
 import { handleApi, pruneOldBodies } from "./api";
 import { scheduledClosing } from "./closing";
 import { json } from "./http";
+import { handleStockUpload, loadStocks, stockDataText } from "./stocks";
 
 // 沒登入也能拿到的東西：登入頁本身和它需要的檔案
 const PUBLIC_PATHS = new Set(["/login", "/login.js", "/style.css", "/favicon.svg", "/robots.txt", "/api/login"]);
@@ -102,6 +103,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     return new Response(ROBOTS_TXT, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
   if (path === "/api/login") return handleLogin(request, env, secure);
+  // GitHub Actions 傳代號清單進來，用自己的權杖，不用群組密碼（src/stocks.ts）
+  if (path === "/api/stock-data") return handleStockUpload(request, env);
 
   const loggedIn =
     !!env.GROUP_PASSWORD && (await isValidSession(readCookie(request, SESSION_COOKIE), env.GROUP_PASSWORD));
@@ -123,6 +126,13 @@ async function route(request: Request, env: Env): Promise<Response> {
       console.error("api error", path, err);
       return json({ error: "伺服器出了點問題，請稍後再試。" }, 500);
     }
+  }
+
+  // 代號清單：資料庫那份比較新就給那份（每天自動更新的），否則用部署時帶的檔案
+  if (path === "/data/stocks.json") {
+    await loadStocks(env.DB);
+    const text = stockDataText();
+    if (text) return new Response(text, { headers: { "Content-Type": "application/json; charset=utf-8" } });
   }
 
   return withBrand(await env.ASSETS.fetch(request), env.SITE_BRAND, env.SITE_TITLE_PREFIX);

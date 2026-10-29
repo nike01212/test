@@ -35,7 +35,7 @@
 | `public/data/tags.json` | 標籤清單和關鍵字（手動維護） |
 | `public/data/big-companies.json` | 國際大廠名單：全球市值前 100 名（有資料日期和來源）加上其他常見的知名企業，含常見中英文別名（手動維護） |
 | `public/.assetsignore` | 不要上傳到網站的檔案（Mac 的 Finder 自動產生的 `.DS_Store`） |
-| `scripts/update-data.mjs` | 從證交所、櫃買中心抓上面兩個資料檔（上市、上櫃、興櫃的代號一覽表都抓） |
+| `scripts/update-data.mjs` | 從證交所、櫃買中心抓上面兩個資料檔（上市、上櫃、興櫃的代號一覽表都抓）；加 `--upload 網址` 只抓代號清單、傳到網站（GitHub Actions 每天跑） |
 | `scripts/otc-snapshot.mjs` | 在家裡的電腦補某一天的上櫃收盤快照（`npm run otc-snapshot -- 2026-10-22`，見「收盤資料從哪裡來」） |
 | `tests/` | 比對、標籤與大廠、memo 每檔的那一段、交易日規則、匯出分組、勾選存放、收盤資料解析、連續天數的測試（`npm test`）；`trader`、`edge`、`api` 三個是 2026/10/28 用交易者、測試工程師、全端工程師的角度補的（見「日常操作」的自動測試）；`tests/fixtures/` 是 2026/10/22 證交所、櫃買中心的真實收盤資料（只留幾檔） |
 | `tests/helpers/worker.mjs` | 在 Node 裡跑伺服器的程式給 `api.test.mjs` 用：本機記憶體裡的 SQLite 套上 `migrations/` 的表格，包成 D1 的樣子 |
@@ -87,7 +87,10 @@
 
 - **改群組密碼**：重新執行第 3 步。改完之後所有人都會被登出，要用新密碼重新登入。
 - **更新網站**：先 `npm run deploy:staging` 部署到測試站，發起人確認後再 `npm run deploy` 部署正式站（有新的資料庫 migration 也會一起套用）。`migrations/` 多了新檔案時，先執行 `npx wrangler d1 migrations apply DB --remote` 再部署，新程式才不會有幾秒讀不到新欄位。
-- **更新代號清單和休市日**：`npm run update-data`，再 `npm run deploy`。有新股上市櫃（包括興櫃轉上櫃）、公司改名，或證交所公布明年休市日（通常在年底）之後跑一次。行事曆還沒公布的年份，系統只會排除週末和元旦，交易日檢查會提醒。
+- **代號清單自動更新**（2026/10/29 起）：GitHub Actions（`.github/workflows/dailynews-stock-data.yml`）台北時間週一到週五 07:00 從證交所、櫃買中心抓上市、上櫃、興櫃的代號一覽表，傳到網站的 `/api/stock-data` 存進資料庫，網站馬上改用新的清單，不用重新部署。每次新增、拿掉、改名的個股寫在 GitHub 那次執行的紀錄裡；在 Actions 頁面按「Run workflow」可以馬上跑一次。網頁最下面寫「超過 7 天沒自動更新了」時：GitHub 在專案 60 天沒有新的 commit 會自動停掉排程，到 Actions 頁面重新啟用；還是失敗就看那次執行的紀錄。
+  - 設定：網站要有權杖 `npx wrangler secret put STOCK_UPLOAD_TOKEN`（測試站加 `--env staging`，兩邊用同一個值），GitHub 的 Settings → Secrets and variables → Actions 放同一個值的 Secret `STOCK_UPLOAD_TOKEN`，Variable `STOCK_UPLOAD_SITES` 寫要傳到哪些網站（逗號隔開）。
+  - 網站用資料庫那份和部署時帶的 `public/data/stocks.json` 裡比較新的那一份。
+- **更新休市日**（代號清單也可以手動更新）：`npm run update-data`，再 `npm run deploy`。證交所公布明年休市日（通常在年底）之後跑一次。行事曆還沒公布的年份，系統只會排除週末和元旦，交易日檢查會提醒。
 - **颱風假等臨時休市**：證交所的行事曆不會補上颱風假，要在 `public/data/closures.json` 的 `closed` 加一行（例如 `"2026-10-23": "薔琵颱風停止交易"`），再 `npm run deploy`。加了之後那天貼的會自動歸到下一個開盤日，收盤比對、延續性觀察、連續被提到都會跳過那天。已經歸到那天的資料不會自動搬，要在「這天貼入的資料」按「改日期」移過去。
 - **調整比對規則**：改 `public/data/name-rules.json`，再 `npm run deploy`。例如某個常見詞一直被誤判成股票，就加進 `ignore`；某檔的常見叫法對不到，就加進 `aliases`；已經下市、併進別家的公司（例如矽品），加進 `merged`。
 - **調整標籤**：改 `public/data/tags.json`（加標籤、加關鍵字），再 `npm run deploy`。寫法看檔案開頭的 `_說明`；改完可以先跑 `npm test`，格式寫錯會直接告訴你哪裡。

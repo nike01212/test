@@ -8,7 +8,7 @@
 // 解析要 6～10 毫秒，快碰到免費方案的上限；櫃買中心則擋掉 Cloudflare 的機房，正式站上櫃一定抓不到。
 // 所以排程收盤後另外把全部上櫃股存一份「上櫃收盤快照」，上櫃股都先看快照（2026/10/27 修 10/22 比對失敗）。
 import { calendar } from "./calendar";
-import { findStock, otcCodes } from "./stocks";
+import { findStock, loadStocks, otcCodes } from "./stocks";
 import {
   isLimitUp,
   loadTpexQuotes,
@@ -300,6 +300,7 @@ export async function checkCloses(
 // 排程（wrangler.jsonc）：收盤後到隔天開盤前跑好幾次。先存前一個交易日的上櫃收盤快照（存過就跳過，
 // 沒存成功下一次排程再試），再比對「現在貼會歸到的那一頁」新貼的個股（比對過的不再抓，沒有新的就直接結束）
 export async function scheduledClosing(env: Env, scheduledMs: number): Promise<string> {
+  await loadStocks(env.DB); // 新上櫃的也要存進快照
   const listDay = assignTradingDay(scheduledMs, calendar).tradingDay;
   const day = previousTradingDay(listDay, calendar);
   const snapshot = await saveOtcSnapshot(env, day, scheduledMs).catch((err: Error) => `${day} 沒存成：${err.message}`);

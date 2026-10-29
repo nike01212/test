@@ -28,6 +28,9 @@ const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
 const MAX_SOURCE_SENTENCES = 2;
 const QUICK_HINT = "點代號可以複製";
 const COMPANY_LIST_REFRESH_DAYS = 183; // 國際大廠名單大約每半年照市值排名更新一次，超過就在網頁最下面提醒
+// 代號清單 GitHub Actions 每個交易日早上自動更新（2026/10/29），超過這幾天沒更新就在網頁最下面提醒
+// （GitHub 在專案 60 天沒有新的 commit 時會自動停掉排程，要到 Actions 頁面重新啟用）
+const STOCK_LIST_STALE_DAYS = 7;
 const MITAKE_MAX_BYTES = 100_000; // 三竹的自選清單只有幾百個位元組，比這大的一定不是
 const TITLE_PREFIX = document.documentElement.dataset.titlePrefix ?? ""; // 測試站是「【測試站】」（伺服器加的），正式站沒有
 
@@ -2139,7 +2142,9 @@ async function fetchJson(path) {
 async function loadMatcher() {
   const [stocks, rules] = await Promise.all(["/data/stocks.json", "/data/name-rules.json"].map(fetchJson));
   state.matcher = buildMatcher(stocks, rules);
-  state.dataInfo = ` · 代號清單 ${state.matcher.size.toLocaleString()} 檔（${stocks.updated} 更新）`;
+  const age = (Date.now() - Date.parse(`${stocks.updated}T00:00:00+08:00`)) / 86_400_000;
+  const stale = !(age <= STOCK_LIST_STALE_DAYS) ? `，超過 ${STOCK_LIST_STALE_DAYS} 天沒自動更新了` : "";
+  state.dataInfo = ` · 代號清單 ${state.matcher.size.toLocaleString()} 檔（${stocks.updated} 更新${stale}）`;
   renderDataInfo();
   if (state.data) render(); // 補上待確認候選的名稱、句子裡的標示
   renderPreview();
