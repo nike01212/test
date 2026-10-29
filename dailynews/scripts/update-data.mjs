@@ -12,7 +12,9 @@
 // - 公司全名（用來產生別名）：證交所 OpenAPI t187ap03_L、櫃買中心 OpenAPI mopsfin_t187ap03_O
 // - 休市日：證交所「市場開休市日期」
 
+import { execFile } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
+import { promisify } from "node:util";
 
 const OUT_DIR = new URL("../public/data/", import.meta.url);
 
@@ -30,22 +32,21 @@ const HOLIDAY_API = "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySched
 // ISIN 表裡要收的分類（權證、ETF、特別股、TDR 等不收）
 const STOCK_CATEGORIES = new Set(["股票", "創新板"]);
 
-// 上市那份一覽表約 10 MB，從 GitHub 的機器下載要 15～65 秒，有時候會整個停住（2026/10/29 實測）。
-// 每次最多等 3 分鐘，停住就重抓，最多抓 3 次
-const FETCH_TIMEOUT_MS = 180_000;
+// 上市那份一覽表約 10 MB。從 GitHub 的機器用 Node 的 fetch 下載會停住（2026/10/29 實測：65 秒到 3 分鐘以上都有），
+// 同一個網址用 curl 15 秒就下載完，所以改用 curl（GitHub 的機器和 Mac 都有）。每次最多等 3 分鐘，最多抓 3 次
+const FETCH_TIMEOUT_SECONDS = 180;
 const FETCH_TRIES = 3;
+const run = promisify(execFile);
 
 async function fetchOnce(url) {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "dailynews-update-data" },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`${url} 回應 ${res.status}`);
-  // 內容先讀完，逾時也算在裡面（停住多半是停在下載內容的時候）
-  const body = await res.arrayBuffer();
+  const { stdout } = await run(
+    "curl",
+    ["--silent", "--show-error", "--fail", "--location", "--max-time", String(FETCH_TIMEOUT_SECONDS), "--user-agent", "dailynews-update-data", url],
+    { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+  );
   return {
-    arrayBuffer: async () => body,
-    json: async () => JSON.parse(new TextDecoder().decode(body)),
+    arrayBuffer: async () => stdout.buffer.slice(stdout.byteOffset, stdout.byteOffset + stdout.byteLength),
+    json: async () => JSON.parse(stdout.toString("utf8")),
   };
 }
 
@@ -55,7 +56,7 @@ async function fetchOk(url) {
       return await fetchOnce(url);
     } catch (err) {
       if (i >= FETCH_TRIES) throw err;
-      console.warn(`${url} 第 ${i} 次失敗（${err.name === "TimeoutError" ? "逾時" : err.message}），重抓`);
+      console.warn(`${url} 第 ${i} 次失敗（${String(err.stderr ?? err.message).trim()}），重抓`);
       await new Promise((r) => setTimeout(r, 5000 * i));
     }
   }
