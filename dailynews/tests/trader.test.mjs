@@ -174,6 +174,29 @@ test("只寫興櫃股名稱、沒寫代號：名稱裡的上市櫃股名稱不�
   assert.deepEqual(matcher.analyze("宏偉電機在手訂單翻倍").emerging, []);
 });
 
+test("只寫 -KY 的興櫃名稱、沒寫代號：TLC-KY 這 6 檔也認出是興櫃股（10/30 工商時報那篇）", () => {
+  // 2026/10/30 工商時報 A15「TLC啖授權利多 明年拚轉盈」抓得到的標題和第一段，沒寫 7924
+  const article =
+    "TLC啖授權利多 明年拚轉盈\nQ4估有1,500萬美元簽約金入帳；啟動IPO，預計11月送件申請\n" +
+    "　TLC-KY（台微體）授權利多接棒，總經理葉志鴻29日表示，繼退化性膝關節炎新藥TLC599以最高2.03億美元授權日本臟器製藥後，" +
+    "術後長效止痛新藥TLC590三期臨床解盲成功。TLC-KY對明年轉盈深具信心。";
+  const r = matcher.analyze(article);
+  assert.deepEqual(r.mentions, []);
+  assert.deepEqual(r.emerging, [{ code: "7924", name: "TLC-KY" }]);
+  // 標題的「TLC」、藥名「TLC599」不算，只認兩個「TLC-KY」
+  assert.deepEqual(r.emergingSpans.map(([s, e]) => article.slice(s, e)), ["TLC-KY", "TLC-KY"]);
+  // 6 檔都認得；全形的「－KY」、沒有「-」的「KY」也算；拿掉 KY 的名稱照舊不比對
+  for (const [code, name] of [["6950", "科科科技-KY"], ["6976", "育世博-KY"], ["7829", "思捷優達-KY"], ["7851", "慧康生技-KY"], ["7871", "安立璽榮-KY"], ["7924", "TLC-KY"]]) {
+    for (const written of [name, name.replace("-", "－"), name.replace("-", "")]) {
+      const hit = matcher.analyze(`${written}今年營收創新高`);
+      assert.deepEqual([hit.mentions, hit.emerging], [[], [{ code, name }]], written);
+    }
+    assert.deepEqual(matcher.analyze(`${name.replace("-KY", "")}今年營收創新高`).emerging, [], name);
+  }
+  // 名稱緊接著代號照舊只算一次
+  assert.deepEqual(matcher.analyze("TLC-KY(7924)授權利多").emerging, [{ code: "7924", name: "TLC-KY" }]);
+});
+
 test("ETF：4 碼的（0050、0056）變待確認並說明可能是 ETF，5 碼的（00878）不理", () => {
   const r = matcher.analyze("元大高股息(0056)、國泰永續高股息(00878)成交量放大");
   assert.deepEqual(r.mentions.map((m) => m.status), ["pending"]);

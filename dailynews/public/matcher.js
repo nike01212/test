@@ -159,11 +159,14 @@ export function buildMatcher(stocksData, rules = {}) {
   }
   // 興櫃股的名稱裡有上市櫃股的名稱（「特力屋」裡的「特力」、「宏碁創達」裡的「宏碁」，366 檔裡有 19 檔）：
   // 沒寫代號也整個名稱當成興櫃股，裡面的字不算上市櫃股（2026/10/28 發起人要求）。
+  // 名稱以 -KY 結尾的（TLC-KY、科科科技-KY 等 6 檔）是公司專有的名稱，也整個名稱認出來，「TLCKY」也算；
+  // 只寫「TLC」不算（新聞裡 TLC599 是藥名）（2026/10/30 發起人要求）。
   // 其他興櫃名稱照舊不比對（很多是一般用語，例如相互、開展、公信）
   const emergingKeys = [...emerging].flatMap(([code, name]) => {
     const key = normalize(name).replace(/\s+/g, "");
     const hasListed = scanNames(key).some((t) => t.entry.codes.size && !t.entry.ignore);
-    return key.length >= 2 && !dict.has(key) && hasListed ? [[key, code]] : [];
+    const keys = [...(hasListed ? [key] : []), ...(/-KY$/.test(key) ? [key, key.replace(/-KY$/, "KY")] : [])];
+    return [...new Set(keys)].filter((k) => k.length >= 2 && !dict.has(k)).map((k) => [k, code]);
   });
   for (const [key, code] of emergingKeys) register(key, TIER_IGNORE_ONLY).emerging = code;
 
